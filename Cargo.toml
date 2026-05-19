@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "xbricks_protocol",
+    "plugins/tcp_engine",
+    "plugins/icmp_filter",
+    "plugins/filter_plugin",
+    "plugins/generator_plugin",
+    "plugins/tick_gen"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+wit-bindgen = "0.54"
+spin = "0.10"
+anyhow = "1"
+macaddr = { version = "1.0.1", default-features = false, features = ["serde"] }
+network-types = { version = "0.2", default-features = false }

@@ -1,0 +1,19 @@
+# --- RUST ---
+# Ignore the compiled Rust binaries and build artifacts
+/target/
+**/*.rs.bk
+
+# Ignore JS environment files (in case you add secrets later)
+.env
+.env.local
+.env.*.local
+
+# --- IDEs ---
+# Ignore JetBrains workspace files
+.idea/
+.claude/
+bin/
+*.iml
+
+#ignore tools
+xdp-tools/
