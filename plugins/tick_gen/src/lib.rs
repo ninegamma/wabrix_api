@@ -2,7 +2,6 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use xbricks_protocol::wbatch::Pdu0;

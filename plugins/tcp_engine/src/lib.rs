@@ -1,9 +1,13 @@
 #![no_std]
+
+pub mod connections;
+
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use network_types::eth::EtherType;
@@ -11,8 +15,9 @@ use macaddr::MacAddr6;
 
 use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
 use xbricks_protocol::headers::hstack::HeaderStack;
-use xbricks_protocol::helpers::{prepare_checksums_and_ttl, update_tcp_checksum};
+use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
 use xbricks_protocol::wbatch::Pdu0;
+use crate::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::xbricks::plugins::packet_engine::Guest;
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -21,31 +26,12 @@ wit_bindgen::generate!({
     world: "engine-plugin",
 });
 
-// The 4-Tuple that uniquely identifies a TCP connection
-// (Src IP, Src Port, Dst IP, Dst Port)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct FlowKey(u32, u16, u32, u16);
 
 // Standard TCP Flags
 const FLAG_FIN: u8 = 0x01;
 const FLAG_SYN: u8 = 0x02;
 const FLAG_RST: u8 = 0x04;
 const FLAG_ACK: u8 = 0x10;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum TcpState {
-    Closed,
-    Listen,
-    SynSent,
-    SynReceived,
-    Established,
-    FinWait1,
-    FinWait2,
-    Closing,
-    TimeWait,
-    CloseWait,
-    LastAck,
-}
 
 // 1. Define a structured config to hold parsed data
 #[derive(Clone, Default)]
@@ -55,6 +41,10 @@ struct EngineConfig {
     src_ip: Option<[u8; 4]>,
     dst_ip: Option<[u8; 4]>,
     rng_seed: Option<u32>,
+    syn_rate: Option<u64>,
+    tsc_frequency: u64,
+    syn_limit: Option<u64>,
+    close_timeout_millis: Option<u64>,
 }
 
 static CONFIG: Mutex<Option<EngineConfig>> = Mutex::new(None);
@@ -63,47 +53,56 @@ struct Connection {
     state: TcpState,
     snd_nxt: u32,
     rcv_nxt: u32,
+    last_active_tsc: u64, // NEW: Track idle time
 }
 
-static CONNECTIONS: Mutex<Option<BTreeMap<FlowKey, Connection>>> = Mutex::new(None);
+static CONNECTIONS: Mutex<Option<ConnectionPool>> = Mutex::new(None);
+// NEW: Global Time & Timeout Queues
+static CURRENT_TSC: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMEOUT_SCAN: Mutex<u64> = Mutex::new(0);
+static TIMEOUT_QUEUE: Mutex<Vec<FlowKey>> = Mutex::new(Vec::new());
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
 
+const TM_DROP: u32 = 0;
+const TM_LINUX: u32 = 1;
+const TM_TCP_REPLY: u32 = 2;
+const TM_SYN_GEN: u32 = 3;
+const TM_FIN_GEN: u32 = 4;
+
+const PORT_START_RANGE: u16 = 10000;
+const PORT_END_RANGE: u16 = 65535;
+
+struct SynGenerator {
+    last_tsc: u64,
+    cycle_accumulator: u128,
+    port_counter: u16,
+    /// Simple seed for ISNs
+    prng_state: u32,
+    /// Track total SYNs generated
+    syns_sent: u64,
+}
+
+static SYN_GEN: Mutex<SynGenerator> = Mutex::new(SynGenerator {
+    last_tsc: 0,
+    cycle_accumulator: 0,
+    port_counter: PORT_START_RANGE, // Ephemeral port start range
+    prng_state: 1,       // Simple seed for ISNs
+    syns_sent: 0,
+});
+
+
 fn init_state_machine() {
-    *CONNECTIONS.lock() = Some(BTreeMap::new());
-}
-
-// =====================================================================
-// #![no_std] Safe Parsers
-// =====================================================================
-fn parse_mac(mac: &str) -> Option<[u8; 6]> {
-    let mut bytes = [0u8; 6];
-    let mut parts = mac.split(':');
-    for i in 0..6 {
-        let part = parts.next()?;
-        bytes[i] = u8::from_str_radix(part, 16).ok()?;
-    }
-    if parts.next().is_some() { return None; }
-    Some(bytes)
-}
-
-fn parse_ip(ip: &str) -> Option<[u8; 4]> {
-    let mut bytes = [0u8; 4];
-    let mut parts = ip.split('.');
-    for i in 0..4 {
-        let part = parts.next()?;
-        bytes[i] = part.parse::<u8>().ok()?;
-    }
-    if parts.next().is_some() { return None; }
-    Some(bytes)
+    // 65536 is a good default capacity to prevent re-allocations
+    *CONNECTIONS.lock() = Some(ConnectionPool::new(65536));
 }
 
 struct TcpEngine;
 
 impl Guest for TcpEngine {
-    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>) {
+    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency:u64) {
         init_state_machine();
         let mut config = EngineConfig::default();
 
@@ -114,9 +113,13 @@ impl Guest for TcpEngine {
                 "src_ip" => config.src_ip = parse_ip(&value),
                 "dst_ip" => config.dst_ip = parse_ip(&value),
                 "rng_seed" => config.rng_seed = value.parse::<u32>().ok(),
+                "syn_rate" => config.syn_rate = parse_suffixed_number(&value).ok(),
+                "syn_limit" => config.syn_limit = value.parse::<u64>().ok(),
+                "close_timeout" => config.close_timeout_millis = value.parse::<u64>().ok(),
                 _ => {}
             }
         }
+        config.tsc_frequency = tsc_frequency;
         *CONFIG.lock() = Some(config);
     }
 
@@ -129,7 +132,7 @@ impl Guest for TcpEngine {
 
         // Lock Global States ONCE per batch
         let mut connections_guard = CONNECTIONS.lock();
-        let table = connections_guard.as_mut().expect("Table uninitialized");
+        let pool = connections_guard.as_mut().expect("Table uninitialized");
         let local_config = CONFIG.lock().clone().unwrap_or_default();
 
         for pdu in pdus.iter_mut() {
@@ -137,30 +140,93 @@ impl Guest for TcpEngine {
             let mut len = 64;
             if pdu.is_a_tick(umem_addr) {
                 let mut generated_reply = false;
-                // 1. Scan your table for a connection that needs to send a packet
-                // (e.g. find ONE connection that has expired its Retransmission Timer)
-                /* if let Some((flow_key, conn)) = find_timed_out_connection(table) {
-                    let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
-                    len = write_tcp_reply(data_ptr, &local_config, ...);
-                    action = ROUTE_TX;
-                    generated_reply = true;
-                }
-                */
 
-                // 2. If no timeouts needed this frame, drop it safely
+                // PRIORITY 1: Process Timeout Teardowns
+                let pending_timeout = {
+                    let mut queue = TIMEOUT_QUEUE.lock();
+                    queue.pop()
+                };
+
+                if let Some(flow_key) = pending_timeout {
+                    if let Some(conn) = pool.get_mut(&flow_key) {
+                        let data_ptr = pdu.data_ptr(umem_addr);
+
+                        // Extract IPs/Ports from the FlowKey.
+                        // Note: Our generator uses (TheirIP, TheirPort, OurIP, OurPort)
+                        len = write_tcp_reply(
+                            data_ptr, &local_config,
+                            flow_key.2, flow_key.3, // Our IP / Port
+                            flow_key.0, flow_key.1, // Their IP / Port
+                            conn.snd_nxt, conn.rcv_nxt, FLAG_FIN | FLAG_ACK
+                        );
+
+                        conn.snd_nxt = conn.snd_nxt.wrapping_add(1); // Increment for FIN flag
+                        action = ROUTE_TX;
+                        action |= TM_FIN_GEN << 16;
+                        generated_reply = true;
+                    }
+                }
+
+                // PRIORITY 2: Generate new SYNs
+                if !generated_reply {
+                    let syn_rate = local_config.syn_rate.unwrap_or(0);
+                    if syn_rate > 0 {
+                        let mut gen = SYN_GEN.lock();
+
+                        // Check if we are still allowed to send
+                        let allowed_to_send = match local_config.syn_limit {
+                            Some(max_syns) => gen.syns_sent < max_syns,
+                            None => true, // Infinite generation if no limit provided
+                        };
+
+                        if allowed_to_send {
+                            gen.syns_sent += 1; // Increment the generated count!
+
+                            // 1. Generate LCG Random ISN
+                            gen.prng_state = gen.prng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+                            let isn = gen.prng_state;
+
+                            // 2. Assign Source Port
+                            let src_port = gen.port_counter;
+                            gen.port_counter = if gen.port_counter >= PORT_END_RANGE { PORT_START_RANGE } else { gen.port_counter + 1 };
+
+                            let dst_port = 80; // Target port (e.g., HTTP)
+                            let our_ip = u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
+                            let their_ip = u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
+
+                            let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
+
+                            // 3. Register state so we can handle the SYN-ACK
+                            pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1),0, CURRENT_TSC.load(Ordering::Relaxed));
+
+                            // 4. Write the packet
+                            let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
+                            len = write_tcp_reply(
+                                data_ptr, &local_config,
+                                our_ip, src_port,
+                                their_ip, dst_port,
+                                isn, 0, FLAG_SYN
+                            );
+                            action = ROUTE_TX;
+                            action |= TM_SYN_GEN << 16;
+                            generated_reply = true;
+                        }
+                    }
+                }
+                // nothing generated, drop the tick
                 if !generated_reply {
                     action = ROUTE_DROP;
-                    action |= 2 << 16;
-                    len = 64; // Better to set len to 0 when dropping to save TX ring bandwidth
+                    action |= TM_DROP << 16;
+                    len = 64;
                 }
             } else if pdu.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
                 // TCP FRAME
-                (action, len) = handle_tcp_packet(pdu, table, &local_config, umem_addr);
-                action |= 0 << 16;
+                (action, len) = handle_tcp_packet(pdu, pool, &local_config, umem_addr);
+                action |= TM_TCP_REPLY << 16;
             } else {
                 // Not TCP -> Forward to standard Linux networking stack
                 action = ROUTE_LINUX;
-                action |= 1 << 16;
+                action |= TM_LINUX << 16;
                 len = pdu.data_len();
             }
             actions.push(action);
@@ -171,17 +237,79 @@ impl Guest for TcpEngine {
     }
 
     fn process_timers(current_tsc: u64) -> u32 {
-        1  // for testing purposes, we can just return 1
+        // Share time with process_batch
+        CURRENT_TSC.store(current_tsc, Ordering::Relaxed);
+
+        let config = CONFIG.lock().clone().unwrap_or_default();
+        let tsc_freq = config.tsc_frequency;
+        let mut frames_to_request = 0;
+
+        if tsc_freq == 0 { return 0; }
+
+        // =================================================================
+        // 1. TIMEOUT SCAVENGER
+        // =================================================================
+        if let Some(timeout_millis) = config.close_timeout_millis {
+            let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128)/1000) as u64;
+            let mut last_scan = LAST_TIMEOUT_SCAN.lock();
+
+            // Run the heavy table scan only once every 100ms to save CPU
+            if current_tsc.saturating_sub(*last_scan) > (tsc_freq / 10) {
+                *last_scan = current_tsc;
+                let mut pool_guard = CONNECTIONS.lock();
+                let mut queue = TIMEOUT_QUEUE.lock();
+
+                if let Some(pool) = pool_guard.as_mut() {
+                    let timeouts= pool.scavenge_timeouts(current_tsc, timeout_cycles);
+                    queue.extend(timeouts);
+                }
+            }
+        }
+        frames_to_request += TIMEOUT_QUEUE.lock().len() as u32;
+
+        // =================================================================
+        // 2. SYN GENERATOR (Your existing logic)
+        // =================================================================
+        let syn_rate = config.syn_rate.unwrap_or(0);
+        if syn_rate > 0 {
+            let mut gen = SYN_GEN.lock();
+
+            let allowed_to_send = match config.syn_limit {
+                Some(max_syns) => gen.syns_sent < max_syns,
+                None => true,
+            };
+
+            if allowed_to_send {
+                if gen.last_tsc == 0 { gen.last_tsc = current_tsc; }
+                let delta_tsc = current_tsc.saturating_sub(gen.last_tsc);
+                gen.last_tsc = current_tsc;
+
+                gen.cycle_accumulator += (delta_tsc as u128) * (syn_rate as u128);
+                let mut syn_frames = (gen.cycle_accumulator / (tsc_freq as u128)) as u32;
+
+                if let Some(max_syns) = config.syn_limit {
+                    let remaining = max_syns.saturating_sub(gen.syns_sent);
+                    if (syn_frames as u64) > remaining {
+                        syn_frames = remaining as u32;
+                    }
+                }
+                gen.cycle_accumulator %= tsc_freq as u128;
+                frames_to_request += syn_frames;
+            }
+        }
+
+        frames_to_request
     }
 }
 
 /// Extracts protocol data, runs the state machine, and formats replies
 fn handle_tcp_packet(
     pdu: &mut Pdu0,
-    table: &mut BTreeMap<FlowKey, Connection>,
+    pool: &mut ConnectionPool,
     config: &EngineConfig,
     umem_addr: usize,
 ) -> (u32, u32) {
+    let current_tsc = CURRENT_TSC.load(Ordering::Relaxed); // Grab the time
     let base_addr = pdu.base_addr(umem_addr);
     let headers = pdu.headers();
 
@@ -228,7 +356,7 @@ fn handle_tcp_packet(
     let mut current_state = None;
 
     // 1. IS THIS A KNOWN CONNECTION?
-    if let Some(conn) = table.get_mut(&flow_key) {
+    if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
         // Yes! Run the normal state machine
         action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len);
         current_state = Some(conn.state);
@@ -246,11 +374,7 @@ fn handle_tcp_packet(
             let rcv_nxt = seq_num.wrapping_add(1);
             let initial_snd_nxt = 1000u32; // In production, generate a random ISN here!
 
-            table.insert(flow_key, Connection {
-                state: TcpState::SynReceived,
-                snd_nxt: initial_snd_nxt.wrapping_add(1),
-                rcv_nxt,
-            });
+            pool.insert(flow_key, TcpState::SynReceived, initial_snd_nxt.wrapping_add(1), rcv_nxt, current_tsc);
 
             // Reply with SYN-ACK
             action_opt = Some((FLAG_SYN | FLAG_ACK, initial_snd_nxt, rcv_nxt));
@@ -269,7 +393,7 @@ fn handle_tcp_packet(
 
     // 2. MEMORY CLEANUP: Delete dead connections
     if current_state == Some(TcpState::Closed) {
-        table.remove(&flow_key);
+        pool.remove(&flow_key);
     }
 
     // 3. FORMAT REPLY
@@ -290,7 +414,7 @@ fn handle_tcp_packet(
 
 /// The core RFC 793 State Machine Logic
 fn run_tcp_state_machine(
-    conn: &mut Connection,
+    conn: &mut ConnectionNode,
     tcp_flags: u8,
     seq_num: u32,
     ack_num: u32,
@@ -315,6 +439,20 @@ fn run_tcp_state_machine(
                 let send_seq = conn.snd_nxt;
                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                 return Some((FLAG_SYN | FLAG_ACK, send_seq, conn.rcv_nxt));
+            }
+        }
+        TcpState::SynSent => {
+            if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 {
+                // The server acknowledged our SYN!
+                if ack_num == conn.snd_nxt {
+                    conn.state = TcpState::Established;
+                    conn.rcv_nxt = seq_num.wrapping_add(1);
+                    return reply!(FLAG_ACK); // Complete the 3-way handshake
+                } else {
+                    return Some((FLAG_RST, ack_num, 0)); // Bad ACK sequence
+                }
+            } else if tcp_flags & FLAG_RST != 0 {
+                conn.state = TcpState::Closed; // Connection refused
             }
         }
         TcpState::SynReceived => {

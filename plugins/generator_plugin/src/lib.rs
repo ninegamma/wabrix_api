@@ -11,6 +11,7 @@ use xbricks_protocol::headers::{IpHeader, MacHeader, TcpHeader};
 use xbricks_protocol::wbatch::Pdu0;
 use crate::exports::xbricks::plugins::generator::Guest;
 use network_types::eth::EtherType;
+use xbricks_protocol::helpers::{parse_ip, parse_mac};
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
@@ -37,40 +38,6 @@ static SEQ_COUNTER: AtomicU32 = AtomicU32::new(0);
 struct MyGenerator;
 
 // =====================================================================
-// #![no_std] Safe Parsers
-// =====================================================================
-
-fn parse_mac(mac: &str) -> Option<[u8; 6]> {
-    let mut bytes = [0u8; 6];
-    let mut parts = mac.split(':');
-
-    for i in 0..6 {
-        let part = parts.next()?;
-        bytes[i] = u8::from_str_radix(part, 16).ok()?;
-    }
-
-    if parts.next().is_some() {
-        return None;
-    }
-
-    Some(bytes)
-}
-
-fn parse_ip(ip: &str) -> Option<[u8; 4]> {
-    let mut bytes = [0u8; 4];
-    let mut parts = ip.split('.');
-
-    for i in 0..4 {
-        let part = parts.next()?;
-        bytes[i] = part.parse::<u8>().ok()?;
-    }
-
-    if parts.next().is_some() {
-        return None;
-    }
-
-    Some(bytes)
-}
 
 // A lightning-fast, zero-dependency PRNG for #![no_std]
 #[inline(always)]

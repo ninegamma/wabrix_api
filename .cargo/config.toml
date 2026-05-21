@@ -1,0 +1,11 @@
+# Force the WASM linker to pre-allocate 16 MB of initial memory.
+# 16 MB = 16,777,216 bytes. (Must be a multiple of the 64KB Wasm page size).
+[target.wasm32-wasip2]
+rustflags = [
+    "-C", "link-arg=--initial-memory=16777216",
+    # Force the stack size to be exactly 256 KB
+    "-C", "link-arg=-zstack-size=262144",
+    # Optional: Tell the linker to export the stack pointer so you can monitor it!
+    "-C", "link-arg=--export=__global_base",
+    "-C", "link-arg=--export=__heap_base",
+]

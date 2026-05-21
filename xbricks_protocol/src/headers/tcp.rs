@@ -367,8 +367,6 @@ impl TcpHeader {
         u16::from_be(self.csum)
     }
 
-    // TODO: Validate checksum and update checksum
-
     #[inline]
     pub fn set_checksum(&mut self, csum: u16) {
         self.csum = u16::to_be(csum);
@@ -376,15 +374,7 @@ impl TcpHeader {
 
     #[inline]
     pub fn update_checksum_incremental(&mut self, old_word: u16, new_word: u16) {
-        /*trace!(
-            "previous checksum {:X}, old_word = {:X}, new:word = {:X}",
-            u16::from_be(self.csum),
-            old_word,
-            new_word
-        );
-        */
         self.csum = u16::to_be(update_checksum_incremental(u16::from_be(self.csum), old_word, new_word));
-        //trace!("updated checksum {:X}", u16::from_be(self.csum));
     }
 
     /// Urgent pointer
