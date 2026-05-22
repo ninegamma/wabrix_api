@@ -142,6 +142,7 @@ impl ConnectionPool {
                 // If it was established, we need to send a FIN.
                 if self.arena[oldest_idx].state == TcpState::Established {
                     self.arena[oldest_idx].state = TcpState::FinWait1;
+                    self.arena[oldest_idx].last_active_tsc = current_tsc;
                     timed_out_keys.push(key);
 
                     // Move it to the tail so we don't immediately process it again

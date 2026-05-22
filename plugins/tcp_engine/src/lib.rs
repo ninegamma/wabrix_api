@@ -253,8 +253,8 @@ impl Guest for TcpEngine {
             let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128)/1000) as u64;
             let mut last_scan = LAST_TIMEOUT_SCAN.lock();
 
-            // Run the heavy table scan only once every 100ms to save CPU
-            if current_tsc.saturating_sub(*last_scan) > (tsc_freq / 10) {
+            // Run the table scan only once every 20ms to save CPU
+            if current_tsc.saturating_sub(*last_scan) > (tsc_freq / 50) {
                 *last_scan = current_tsc;
                 let mut pool_guard = CONNECTIONS.lock();
                 let mut queue = TIMEOUT_QUEUE.lock();
@@ -464,7 +464,9 @@ fn run_tcp_state_machine(
             if tcp_flags & FLAG_FIN != 0 {
                 conn.state = TcpState::LastAck;
                 conn.rcv_nxt = seq_num.wrapping_add(1).wrapping_add(payload_len);
-                return reply!(FLAG_FIN | FLAG_ACK);
+                let send_seq = conn.snd_nxt;
+                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+                return Some((FLAG_FIN | FLAG_ACK, send_seq, conn.rcv_nxt));
             } else if tcp_flags & FLAG_ACK != 0 && payload_len > 0 {
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
                 return reply!(FLAG_ACK);
