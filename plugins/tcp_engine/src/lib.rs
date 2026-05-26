@@ -1,14 +1,11 @@
 #![no_std]
 
 pub mod connections;
-
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use core::cell::{Cell, RefCell};
 
 use network_types::eth::EtherType;
 use macaddr::MacAddr6;
@@ -16,6 +13,7 @@ use macaddr::MacAddr6;
 use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
 use xbricks_protocol::headers::hstack::HeaderStack;
 use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
+use xbricks_protocol::{PluginOpcode, StandardOpcode};
 use xbricks_protocol::wbatch::Pdu0;
 use crate::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::xbricks::plugins::packet_engine::Guest;
@@ -25,6 +23,45 @@ wit_bindgen::generate!({
     path: "../../wit/xbricks.wit",
     world: "engine-plugin",
 });
+
+// =====================================================================
+// ZERO-COST WASM STATE CONTAINERS
+// =====================================================================
+
+/// A zero-cost, single-threaded state container for WASM.
+/// Uses `RefCell` to prevent re-entrancy panics, but uses NO ATOMICS.
+pub struct WasmCell<T>(RefCell<T>);
+unsafe impl<T> Sync for WasmCell<T> {}
+
+impl<T> WasmCell<T> {
+    pub const fn new(value: T) -> Self {
+        Self(RefCell::new(value))
+    }
+    pub fn borrow_mut(&self) -> core::cell::RefMut<'_, T> {
+        self.0.borrow_mut()
+    }
+    pub fn borrow(&self) -> core::cell::Ref<'_, T> {
+        self.0.borrow()
+    }
+}
+
+/// An even faster container for simple Copy types (like u64).
+/// Uses `Cell`, which doesn't even have a borrow counter. Absolute zero overhead.
+pub struct WasmValue<T>(Cell<T>);
+unsafe impl<T> Sync for WasmValue<T> {}
+
+impl<T> WasmValue<T> {
+    pub const fn new(value: T) -> Self {
+        Self(Cell::new(value))
+    }
+    pub fn get(&self) -> T where T: Copy {
+        self.0.get()
+    }
+    pub fn set(&self, val: T) {
+        self.0.set(val)
+    }
+}
+
 
 
 // Standard TCP Flags
@@ -45,22 +82,36 @@ struct EngineConfig {
     tsc_frequency: u64,
     syn_limit: Option<u64>,
     close_timeout_millis: Option<u64>,
+    /// Whether to bypass the TCP engine and forward packets to the standard Linux networking stack.
+    bypass: bool,
 }
 
-static CONFIG: Mutex<Option<EngineConfig>> = Mutex::new(None);
-
-struct Connection {
-    state: TcpState,
-    snd_nxt: u32,
-    rcv_nxt: u32,
-    last_active_tsc: u64, // NEW: Track idle time
+struct SynGenerator {
+    last_tsc: u64,
+    cycle_accumulator: u128,
+    port_counter: u16,
+    /// Simple seed for ISNs
+    prng_state: u32,
+    /// Track total SYNs generated
+    syns_sent: u64,
+    activated: bool,
 }
 
-static CONNECTIONS: Mutex<Option<ConnectionPool>> = Mutex::new(None);
-// NEW: Global Time & Timeout Queues
-static CURRENT_TSC: AtomicU64 = AtomicU64::new(0);
-static LAST_TIMEOUT_SCAN: Mutex<u64> = Mutex::new(0);
-static TIMEOUT_QUEUE: Mutex<Vec<FlowKey>> = Mutex::new(Vec::new());
+static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
+static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
+static TIMEOUT_QUEUE: WasmCell<Vec<FlowKey>> = WasmCell::new(Vec::new());
+static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
+    last_tsc: 0,
+    cycle_accumulator: 0,
+    port_counter: PORT_START_RANGE,
+    prng_state: 1,
+    syns_sent: 0,
+    activated: false,
+});
+
+// Replaced AtomicU64 and Mutex<u64> with WasmValue (Instant access)
+static CURRENT_TSC: WasmValue<u64> = WasmValue::new(0);
+static LAST_TIMEOUT_SCAN: WasmValue<u64> = WasmValue::new(0);
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
@@ -75,37 +126,20 @@ const TM_FIN_GEN: u32 = 4;
 const PORT_START_RANGE: u16 = 10000;
 const PORT_END_RANGE: u16 = 65535;
 
-struct SynGenerator {
-    last_tsc: u64,
-    cycle_accumulator: u128,
-    port_counter: u16,
-    /// Simple seed for ISNs
-    prng_state: u32,
-    /// Track total SYNs generated
-    syns_sent: u64,
-}
-
-static SYN_GEN: Mutex<SynGenerator> = Mutex::new(SynGenerator {
-    last_tsc: 0,
-    cycle_accumulator: 0,
-    port_counter: PORT_START_RANGE, // Ephemeral port start range
-    prng_state: 1,       // Simple seed for ISNs
-    syns_sent: 0,
-});
 
 
 fn init_state_machine() {
     // 65536 is a good default capacity to prevent re-allocations
-    *CONNECTIONS.lock() = Some(ConnectionPool::new(65536));
+    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(65536));
 }
 
 struct TcpEngine;
 
 impl Guest for TcpEngine {
     fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency:u64) {
-        init_state_machine();
         let mut config = EngineConfig::default();
-
+        config.bypass = false;
+        init_state_machine();
         for (key, value) in data {
             match key.as_str() {
                 "src_mac" => config.src_mac = parse_mac(&value),
@@ -120,20 +154,42 @@ impl Guest for TcpEngine {
             }
         }
         config.tsc_frequency = tsc_frequency;
-        *CONFIG.lock() = Some(config);
+        *CONFIG.borrow_mut() = Some(config);
     }
 
     fn process_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> (Vec<u32>, Vec<u32>) {
         let pdus = Pdu0::slice_from_bytes(&mut batch_bytes);
+
+        let local_config = CONFIG.borrow().clone().unwrap_or_default();
+
+        // =======================================================
+        // Fast-Path Bypass
+        // =======================================================
+        if local_config.bypass {
+            let mut actions = Vec::with_capacity(pdus.len());
+            let mut lengths = Vec::with_capacity(pdus.len());
+            for pdu in pdus.iter() {
+                // Route everything to Linux and drop ticks
+                let action = if pdu.is_a_tick(0) {
+                    ROUTE_DROP | (TM_DROP << 16)
+                } else {
+                    ROUTE_LINUX | (TM_LINUX << 16)
+                };
+                actions.push(action);
+                lengths.push(pdu.data_len());
+            }
+            return (actions, lengths);
+        }
+        // =======================================================
 
         let mut actions = Vec::with_capacity(pdus.len());
         let mut lengths = Vec::with_capacity(pdus.len());
         let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
 
         // Lock Global States ONCE per batch
-        let mut connections_guard = CONNECTIONS.lock();
+        let mut connections_guard = CONNECTIONS.borrow_mut();
         let pool = connections_guard.as_mut().expect("Table uninitialized");
-        let local_config = CONFIG.lock().clone().unwrap_or_default();
+        let local_config = CONFIG.borrow().clone().unwrap_or_default();
 
         for pdu in pdus.iter_mut() {
             let mut action = 0;
@@ -143,7 +199,7 @@ impl Guest for TcpEngine {
 
                 // PRIORITY 1: Process Timeout Teardowns
                 let pending_timeout = {
-                    let mut queue = TIMEOUT_QUEUE.lock();
+                    let mut queue = TIMEOUT_QUEUE.borrow_mut();
                     queue.pop()
                 };
 
@@ -171,11 +227,11 @@ impl Guest for TcpEngine {
                 if !generated_reply {
                     let syn_rate = local_config.syn_rate.unwrap_or(0);
                     if syn_rate > 0 {
-                        let mut gen = SYN_GEN.lock();
+                        let mut gen = SYN_GEN.borrow_mut();
 
                         // Check if we are still allowed to send
-                        let allowed_to_send = match local_config.syn_limit {
-                            Some(max_syns) => gen.syns_sent < max_syns,
+                        let allowed_to_send = gen.activated && match local_config.syn_limit {
+                            Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
                             None => true, // Infinite generation if no limit provided
                         };
 
@@ -197,7 +253,7 @@ impl Guest for TcpEngine {
                             let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
 
                             // 3. Register state so we can handle the SYN-ACK
-                            pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1),0, CURRENT_TSC.load(Ordering::Relaxed));
+                            pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1),0, CURRENT_TSC.get());
 
                             // 4. Write the packet
                             let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
@@ -238,9 +294,9 @@ impl Guest for TcpEngine {
 
     fn process_timers(current_tsc: u64) -> u32 {
         // Share time with process_batch
-        CURRENT_TSC.store(current_tsc, Ordering::Relaxed);
+        CURRENT_TSC.set(current_tsc);
 
-        let config = CONFIG.lock().clone().unwrap_or_default();
+        let config = CONFIG.borrow().clone().unwrap_or_default();
         let tsc_freq = config.tsc_frequency;
         let mut frames_to_request = 0;
 
@@ -251,13 +307,13 @@ impl Guest for TcpEngine {
         // =================================================================
         if let Some(timeout_millis) = config.close_timeout_millis {
             let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128)/1000) as u64;
-            let mut last_scan = LAST_TIMEOUT_SCAN.lock();
+            let last_scan = LAST_TIMEOUT_SCAN.get();
 
             // Run the table scan only once every 20ms to save CPU
-            if current_tsc.saturating_sub(*last_scan) > (tsc_freq / 50) {
-                *last_scan = current_tsc;
-                let mut pool_guard = CONNECTIONS.lock();
-                let mut queue = TIMEOUT_QUEUE.lock();
+            if current_tsc.saturating_sub(last_scan) > (tsc_freq / 50) {
+                LAST_TIMEOUT_SCAN.set(current_tsc);
+                let mut pool_guard = CONNECTIONS.borrow_mut();
+                let mut queue = TIMEOUT_QUEUE.borrow_mut();
 
                 if let Some(pool) = pool_guard.as_mut() {
                     let timeouts= pool.scavenge_timeouts(current_tsc, timeout_cycles);
@@ -265,17 +321,17 @@ impl Guest for TcpEngine {
                 }
             }
         }
-        frames_to_request += TIMEOUT_QUEUE.lock().len() as u32;
+        frames_to_request += TIMEOUT_QUEUE.borrow().len() as u32;
 
         // =================================================================
-        // 2. SYN GENERATOR (Your existing logic)
+        // 2. SYN GENERATOR
         // =================================================================
         let syn_rate = config.syn_rate.unwrap_or(0);
         if syn_rate > 0 {
-            let mut gen = SYN_GEN.lock();
+            let mut gen = SYN_GEN.borrow_mut();
 
-            let allowed_to_send = match config.syn_limit {
-                Some(max_syns) => gen.syns_sent < max_syns,
+            let allowed_to_send = gen.activated && match config.syn_limit {
+                Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
                 None => true,
             };
 
@@ -300,8 +356,77 @@ impl Guest for TcpEngine {
 
         frames_to_request
     }
+
+    // Inside the Wasm plugin code
+
+    fn on_control_event(raw_opcode: u32, payload: Vec<u8>) -> bool {
+        // 1. Convert the raw u32 into our rich enum
+        let opcode = PluginOpcode::from(raw_opcode);
+
+        // 2. Route the command safely
+        match opcode {
+            PluginOpcode::Standard(StandardOpcode::SetOperationalState) => {
+                if payload.len() == 1 {
+                    set_state(payload[0]);
+                    true
+                } else {
+                    false
+                }
+            }
+            PluginOpcode::Standard(StandardOpcode::Ping) => {
+                // Echo the payload back or log it
+                log::info!("PING received");
+                true
+            }
+
+            // --- Developer's Custom Commands ---
+            PluginOpcode::Custom(0x1001) => {
+                //apply_modbus_rules(payload);
+                true
+            }
+            PluginOpcode::Custom(0x1002) => {
+                //clear_connection_cache();
+                true
+            }
+
+            // Unhandled or unknown commands
+            _ => {
+                log::warn!("Ignored opcode: {:?}", opcode);
+                false
+            }
+        }
+    }
 }
 
+fn set_state(state: u8) {
+    let mut syn_gen = SYN_GEN.borrow_mut();
+    let mut config_guard = CONFIG.borrow_mut();
+
+    // Safely attempt to modify the config only if it exists
+    if let Some(config) = config_guard.as_mut() {
+        match state {
+            0 => {
+                // State 0: Offline / Paused
+                syn_gen.activated = false;
+                config.bypass = false;
+            }
+            1 => {
+                // State 1: Online / Active
+                syn_gen.activated = true;
+                config.bypass = false;
+            }
+            2 => {
+                // State 2: Bypass Mode
+                // Disable generation, let all traffic flow transparently
+                syn_gen.activated = false;
+                config.bypass = true;
+            }
+            _ => {
+                // Ignore unknown states
+            }
+        }
+    }
+}
 /// Extracts protocol data, runs the state machine, and formats replies
 fn handle_tcp_packet(
     pdu: &mut Pdu0,
@@ -309,7 +434,7 @@ fn handle_tcp_packet(
     config: &EngineConfig,
     umem_addr: usize,
 ) -> (u32, u32) {
-    let current_tsc = CURRENT_TSC.load(Ordering::Relaxed); // Grab the time
+    let current_tsc = CURRENT_TSC.get(); // Grab the time
     let base_addr = pdu.base_addr(umem_addr);
     let headers = pdu.headers();
 
@@ -352,7 +477,7 @@ fn handle_tcp_packet(
     // This safely ignores any trailing Ethernet zero-padding! (which is counted by pdu.data_len())
     let payload_len = ip_total_len.saturating_sub(ip_hdr_len + tcp_hdr_len);
 
-    let mut action_opt = None;
+    let action_opt;
     let mut current_state = None;
 
     // 1. IS THIS A KNOWN CONNECTION?

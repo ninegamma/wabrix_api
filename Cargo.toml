@@ -6,7 +6,6 @@ members = [
     "plugins/icmp_filter",
     "plugins/filter_plugin",
     "plugins/generator_plugin",
-    "plugins/tick_gen"
 ]
 
 [workspace.package]

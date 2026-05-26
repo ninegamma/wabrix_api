@@ -20,6 +20,8 @@ interface packet-engine {
     /// Process timers and return the number of frames that are needed for the timeouts
     process-timers: func(current-tsc: u64) -> u32;
 
+    // The universal control event receiver
+    on-control-event: func(opcode: u32, payload: list<u8>) -> bool;
 }
 
 /// The interface for nodes that generate new synthetic traffic.
