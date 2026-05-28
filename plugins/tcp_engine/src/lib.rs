@@ -148,7 +148,7 @@ impl Guest for TcpEngine {
                 "dst_ip" => config.dst_ip = parse_ip(&value),
                 "rng_seed" => config.rng_seed = value.parse::<u32>().ok(),
                 "syn_rate" => config.syn_rate = parse_suffixed_number(&value).ok(),
-                "syn_limit" => config.syn_limit = value.parse::<u64>().ok(),
+                "syn_limit" => config.syn_limit = parse_suffixed_number(&value).ok(),
                 "close_timeout" => config.close_timeout_millis = value.parse::<u64>().ok(),
                 _ => {}
             }
@@ -204,24 +204,35 @@ impl Guest for TcpEngine {
                 };
 
                 if let Some(flow_key) = pending_timeout {
-                    if let Some(conn) = pool.get_mut(&flow_key) {
+                    // Extract sequence numbers to avoid borrow checker conflicts
+                    let (snd_nxt, rcv_nxt, exists) = if let Some(conn) = pool.get_mut(&flow_key) {
+                        (conn.snd_nxt, conn.rcv_nxt, true)
+                    } else {
+                        (0, 0, false)
+                    };
+
+                    if exists {
                         let data_ptr = pdu.data_ptr(umem_addr);
 
-                        // Extract IPs/Ports from the FlowKey.
-                        // Note: Our generator uses (TheirIP, TheirPort, OurIP, OurPort)
+                        // Use configured MACs because this is a timer tick, not an incoming packet
+                        let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
+                        let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
+
                         len = write_tcp_reply(
-                            data_ptr, &local_config,
-                            flow_key.2, flow_key.3, // Our IP / Port
-                            flow_key.0, flow_key.1, // Their IP / Port
-                            conn.snd_nxt, conn.rcv_nxt, FLAG_FIN | FLAG_ACK
+                            data_ptr,
+                            reply_src_mac, reply_dst_mac,
+                            flow_key.2, flow_key.3,
+                            flow_key.0, flow_key.1,
+                            snd_nxt, rcv_nxt, FLAG_FIN | FLAG_ACK
                         );
 
-                        conn.snd_nxt = conn.snd_nxt.wrapping_add(1); // Increment for FIN flag
+                        // CRITICAL FIX: Guarantee the connection is removed from Wasm memory!
+                        pool.remove(&flow_key);
+
                         action = ROUTE_TX;
                         action |= TM_FIN_GEN << 16;
                         generated_reply = true;
-                    }
-                }
+                    }                }
 
                 // PRIORITY 2: Generate new SYNs
                 if !generated_reply {
@@ -257,8 +268,13 @@ impl Guest for TcpEngine {
 
                             // 4. Write the packet
                             let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
+
+                            let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
+                            let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
+
                             len = write_tcp_reply(
-                                data_ptr, &local_config,
+                                data_ptr,
+                                reply_src_mac, reply_dst_mac,
                                 our_ip, src_port,
                                 their_ip, dst_port,
                                 isn, 0, FLAG_SYN
@@ -373,6 +389,10 @@ impl Guest for TcpEngine {
                     false
                 }
             }
+            PluginOpcode::Standard(StandardOpcode::FlushState) => {
+                flush_state(payload[0]);
+                true
+            }
             PluginOpcode::Standard(StandardOpcode::Ping) => {
                 // Echo the payload back or log it
                 log::info!("PING received");
@@ -427,6 +447,32 @@ fn set_state(state: u8) {
         }
     }
 }
+
+fn flush_state(mode: u8) {
+    // 1. Clear the connection pool by dropping the old one and allocating a fresh one.
+    // This instantly frees all tracked connections.
+    init_state_machine();
+
+    // 2. Clear the pending timeout teardowns so we don't send FINs for connections
+    // that just got wiped out.
+    TIMEOUT_QUEUE.borrow_mut().clear();
+
+    // 3. Reset the SYN generator tracking
+    let mut syn_gen = SYN_GEN.borrow_mut();
+    syn_gen.syns_sent = 0;
+    syn_gen.cycle_accumulator = 0;
+    syn_gen.last_tsc = 0;
+
+    // Optional: If mode == 1 (Hard Reset), also reset the PRNG and Port Counter
+    // to ensure perfectly repeatable PCAP generation across test runs.
+    if mode == 1 {
+        syn_gen.port_counter = PORT_START_RANGE;
+        syn_gen.prng_state = 1;
+    }
+
+    log::info!("TCP Engine state flushed (mode: {})", mode);
+}
+
 /// Extracts protocol data, runs the state machine, and formats replies
 fn handle_tcp_packet(
     pdu: &mut Pdu0,
@@ -434,99 +480,84 @@ fn handle_tcp_packet(
     config: &EngineConfig,
     umem_addr: usize,
 ) -> (u32, u32) {
-    let current_tsc = CURRENT_TSC.get(); // Grab the time
+    let current_tsc = CURRENT_TSC.get();
     let base_addr = pdu.base_addr(umem_addr);
     let headers = pdu.headers();
 
     // Find header indices safely
+    let mut mac_idx = None;
     let mut ip_idx = None;
     let mut tcp_idx = None;
     for i in 0..headers.count() {
+        if headers.kinds[i] == HeaderKind::Mac { mac_idx = Some(i); }
         if headers.kinds[i] == HeaderKind::Ip { ip_idx = Some(i); }
         if headers.kinds[i] == HeaderKind::Tcp { tcp_idx = Some(i); }
     }
 
-    let (ip_i, tcp_i) = match (ip_idx, tcp_idx) {
-        (Some(i), Some(t)) => (i, t),
-        _ => return (ROUTE_LINUX, pdu.data_len()), // Forward malformed/unexpected packets
+    let (mac_i, ip_i, tcp_i) = match (mac_idx, ip_idx, tcp_idx) {
+        (Some(m), Some(i), Some(t)) => (m, i, t),
+        _ => return (ROUTE_LINUX, pdu.data_len()), // Forward malformed
     };
 
+    let mac_hdr = headers.mac(base_addr, mac_i);
     let ip_hdr = headers.ip(base_addr, ip_i);
     let tcp_hdr = headers.tcp(base_addr, tcp_i);
 
-    // Extract 4-tuple Flow ID
+    // EXTRACT INCOMING MACS
+    let incoming_src_mac = mac_hdr.src.into_array();
+    let incoming_dst_mac = mac_hdr.dst.into_array();
+
     let src_ip = ip_hdr.src();
     let dst_ip = ip_hdr.dst();
     let src_port = tcp_hdr.src_port();
     let dst_port = tcp_hdr.dst_port();
     let flow_key = FlowKey(src_ip, src_port, dst_ip, dst_port);
 
-    // Extract State Machine variables
     let tcp_flags = tcp_hdr.flags();
     let seq_num = tcp_hdr.seq_num();
     let ack_num = tcp_hdr.ack_num();
 
-    // =========================================================
-    // Calculate true payload using IPv4 Total Length
-    // =========================================================
     let ip_total_len = ip_hdr.length() as u32;
     let ip_hdr_len = (ip_hdr.ihl() * 4) as u32;
     let tcp_hdr_len = (tcp_hdr.data_offset() * 4) as u32;
-
-    // The true TCP payload is the IP Total Length minus both headers.
-    // This safely ignores any trailing Ethernet zero-padding! (which is counted by pdu.data_len())
     let payload_len = ip_total_len.saturating_sub(ip_hdr_len + tcp_hdr_len);
 
     let action_opt;
     let mut current_state = None;
 
-    // 1. IS THIS A KNOWN CONNECTION?
     if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
-        // Yes! Run the normal state machine
         action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len);
         current_state = Some(conn.state);
-
     } else {
-        // NO! The connection does NOT exist in our BTreeMap.
+        if tcp_flags & FLAG_RST != 0 { return (ROUTE_DROP, 0); }
 
-        // Rule 1: Ignore stray RSTs
-        if tcp_flags & FLAG_RST != 0 {
-            return (ROUTE_DROP, 0);
-        }
-
-        // Rule 2: Accept new SYNs and create the connection!
         if tcp_flags & FLAG_SYN != 0 {
             let rcv_nxt = seq_num.wrapping_add(1);
-            let initial_snd_nxt = 1000u32; // In production, generate a random ISN here!
-
+            let initial_snd_nxt = 1000u32;
             pool.insert(flow_key, TcpState::SynReceived, initial_snd_nxt.wrapping_add(1), rcv_nxt, current_tsc);
-
-            // Reply with SYN-ACK
             action_opt = Some((FLAG_SYN | FLAG_ACK, initial_snd_nxt, rcv_nxt));
         } else {
-            // Rule 3: Stray ACK, FIN, or Data. Send an RST, but DO NOT save state!
-            // RFC 793: If incoming ACK flag is 0, reply SEQ = 0, ACK = incoming SEQ + len
-            // If incoming ACK is 1, reply SEQ = incoming ACK
             let reply_seq = if tcp_flags & FLAG_ACK != 0 { ack_num } else { 0 };
-            let reply_ack = seq_num.wrapping_add(payload_len).wrapping_add(
-                if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 }
-            );
-
+            let reply_ack = seq_num.wrapping_add(payload_len).wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
             action_opt = Some((FLAG_RST | FLAG_ACK, reply_seq, reply_ack));
         }
     }
 
-    // 2. MEMORY CLEANUP: Delete dead connections
-    if current_state == Some(TcpState::Closed) {
-        pool.remove(&flow_key);
-    }
+    if current_state == Some(TcpState::Closed) { pool.remove(&flow_key); }
 
     // 3. FORMAT REPLY
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
         let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
 
+        // DYNAMIC MAC SWAPPING:
+        // We reply TO the physical MAC that sent this packet.
+        // We send FROM our configured MAC (fallback to the MAC they addressed).
+        let reply_dst_mac = incoming_src_mac;
+        let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
+
         let len = write_tcp_reply(
-            data_ptr, config,
+            data_ptr,
+            reply_src_mac, reply_dst_mac,
             dst_ip, dst_port, // New Src (Us)
             src_ip, src_port, // New Dst (Them)
             reply_seq, reply_ack, reply_flags
@@ -644,7 +675,8 @@ fn run_tcp_state_machine(
 /// Formats the outbound headers back into WASM linear memory
 fn write_tcp_reply(
     wasm_ptr: *mut u8,
-    config: &EngineConfig,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
     src_ip: u32,
     src_port: u16,
     dst_ip: u32,
@@ -654,10 +686,8 @@ fn write_tcp_reply(
     flags: u8,
 ) -> u32 {
     let mut mac = MacHeader::new();
-    let sm = config.src_mac.unwrap_or([0; 6]);
-    mac.src = MacAddr6::new(sm[0], sm[1], sm[2], sm[3], sm[4], sm[5]);
-    let dm = config.dst_mac.unwrap_or([0xff; 6]);
-    mac.dst = MacAddr6::new(dm[0], dm[1], dm[2], dm[3], dm[4], dm[5]);
+    mac.src = MacAddr6::new(src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
+    mac.dst = MacAddr6::new(dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5]);
     mac.set_ethertype(EtherType::Ipv4);
 
     let mut ip = IpHeader::new();
