@@ -20,7 +20,7 @@ pub(crate) enum TcpState {
 
 // The 4-Tuple that uniquely identifies a TCP connection
 // (Src IP, Src Port, Dst IP, Dst Port)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct FlowKey(pub u32, pub u16, pub u32, pub u16);
 
 
@@ -139,18 +139,21 @@ impl ConnectionPool {
                 // It timed out! 
                 let key = self.arena[oldest_idx].key;
 
-                // If it was established, we need to send a FIN.
-                if self.arena[oldest_idx].state == TcpState::Established {
-                    self.arena[oldest_idx].state = TcpState::FinWait1;
+                let state = self.arena[oldest_idx].state;
+                if state == TcpState::Established
+                    || state == TcpState::SynReceived
+                    || state == TcpState::FinWait1
+                {
+                    // Let the tick handler own the state transition (polite close or Guillotine).
+                    // Bump the timestamp so this connection gets a fresh window before the
+                    // next scavenge fires again.
                     self.arena[oldest_idx].last_active_tsc = current_tsc;
                     timed_out_keys.push(key);
 
-                    // Move it to the tail so we don't immediately process it again
-                    // while waiting for the FIN to be ACK'd.
                     self.unlink(oldest_idx);
                     self.push_tail(oldest_idx);
                 } else {
-                    // If it was already closing or dead, just remove it completely.
+                    // Already closed/dead — free the slot directly.
                     self.remove(&key);
                 }
             } else {

@@ -17,6 +17,7 @@ use xbricks_protocol::{PluginOpcode, StandardOpcode};
 use xbricks_protocol::wbatch::Pdu0;
 use crate::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::xbricks::plugins::packet_engine::Guest;
+use crate::xbricks::plugins::logging;
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
@@ -117,16 +118,74 @@ const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
 
-const TM_DROP: u32 = 0;
-const TM_LINUX: u32 = 1;
-const TM_TCP_REPLY: u32 = 2;
-const TM_SYN_GEN: u32 = 3;
-const TM_FIN_GEN: u32 = 4;
+
+pub const STAT_SENT_SYN: usize = 0;
+pub const STAT_SENT_SYNACK: usize = 1;
+pub const STAT_SENT_SYNACK2: usize = 2;
+pub const STAT_SENT_FIN: usize = 3;
+pub const STAT_SENT_FIN_PSSV: usize = 4;
+pub const STAT_SENT_ACK4FIN: usize = 5;
+pub const STAT_SENT_ACK: usize = 6;
+pub const STAT_SENT_RST: usize = 7;
+pub const STAT_RECV_SYN: usize = 8;
+pub const STAT_RECV_SYNACK: usize = 9;
+pub const STAT_RECV_SYNACK2: usize = 10;
+pub const STAT_RECV_FIN: usize = 11;
+pub const STAT_RECV_FIN_PSSV: usize = 12;
+pub const STAT_RECV_ACK4FIN: usize = 13;
+pub const STAT_RECV_ACK: usize = 14;
+pub const STAT_RECV_RST: usize = 15;
+pub const STAT_UNEXPECTED: usize = 16;
+pub const STAT_RECV_PAYLOAD: usize = 17;
+pub const STAT_SENT_PAYLOAD: usize = 18;
+pub const STAT_TICK_DROP: usize = 19;
+pub const STAT_TO_LINUX: usize = 20;
+pub const STAT_DROP: usize = 21;
+pub const STAT_COUNT: usize = 22;
+
+// The zero-cost global counter array
+static TCP_STATS: WasmCell<[u64; STAT_COUNT]> = WasmCell::new([0; STAT_COUNT]);
+
+// The macro to use inside process_batch
+macro_rules! inc_stat {
+    ($stat:expr) => {
+        TCP_STATS.borrow_mut()[$stat] += 1
+    }
+}
+
 
 const PORT_START_RANGE: u16 = 10000;
 const PORT_END_RANGE: u16 = 65535;
 
+struct HostLogger;
 
+impl log::Log for HostLogger {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true // You can add level filtering here if you want to save cycles
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            // Format the message using the alloc crate
+            let msg = alloc::format!("{}", record.args());
+
+            // Call the WIT-generated host function.
+            // The path matches your package: xbricks:plugins/logging
+            logging::log(record.level() as u32, &msg);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+// 2. Add an init function to wire it up when the plugin starts
+pub fn init_logging() {
+    // We use set_logger instead of set_boxed_logger to avoid allocations if possible,
+    // or Box::new if required by the log crate version.
+    static LOGGER: HostLogger = HostLogger;
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Debug); // Set your desired Wasm log level
+}
 
 fn init_state_machine() {
     // 65536 is a good default capacity to prevent re-allocations
@@ -137,6 +196,7 @@ struct TcpEngine;
 
 impl Guest for TcpEngine {
     fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency:u64) {
+        init_logging();
         let mut config = EngineConfig::default();
         config.bypass = false;
         init_state_machine();
@@ -171,9 +231,12 @@ impl Guest for TcpEngine {
             for pdu in pdus.iter() {
                 // Route everything to Linux and drop ticks
                 let action = if pdu.is_a_tick(0) {
-                    ROUTE_DROP | (TM_DROP << 16)
+                    inc_stat!(STAT_DROP);
+                    inc_stat!(STAT_TICK_DROP);
+                    ROUTE_DROP
                 } else {
-                    ROUTE_LINUX | (TM_LINUX << 16)
+                    inc_stat!(STAT_TO_LINUX);
+                    ROUTE_LINUX
                 };
                 actions.push(action);
                 lengths.push(pdu.data_len());
@@ -204,35 +267,69 @@ impl Guest for TcpEngine {
                 };
 
                 if let Some(flow_key) = pending_timeout {
-                    // Extract sequence numbers to avoid borrow checker conflicts
-                    let (snd_nxt, rcv_nxt, exists) = if let Some(conn) = pool.get_mut(&flow_key) {
-                        (conn.snd_nxt, conn.rcv_nxt, true)
-                    } else {
-                        (0, 0, false)
-                    };
+                    let current_tsc = CURRENT_TSC.get();
 
+                    // 1. Extract state using `get_mut_and_touch`.
+                    // This automatically bumps the timestamp so it gets a fresh 5-second window to close!
+                    let (snd_nxt, rcv_nxt, state, exists) = if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
+                        (conn.snd_nxt, conn.rcv_nxt, conn.state, true)
+                    } else {
+                        (0, 0, TcpState::Closed, false)
+                    };
+                    log::debug!("TCP {:?} Timeout: state= {:?}, exist={:?}", flow_key, state, exists);
                     if exists {
                         let data_ptr = pdu.data_ptr(umem_addr);
-
-                        // Use configured MACs because this is a timer tick, not an incoming packet
                         let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                         let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
-                        len = write_tcp_reply(
-                            data_ptr,
-                            reply_src_mac, reply_dst_mac,
-                            flow_key.2, flow_key.3,
-                            flow_key.0, flow_key.1,
-                            snd_nxt, rcv_nxt, FLAG_FIN | FLAG_ACK
-                        );
+                        if state == TcpState::Established || state == TcpState::SynReceived {
+                            // ==========================================
+                            // THE POLITE CLOSE (RFC 793)
+                            // ==========================================
+                            // We re-borrow to update the state safely
+                            if let Some(conn) = pool.get_mut(&flow_key) {
+                                log::debug!("TCP {:?} Timeout: {:?} -> {:?}", flow_key, conn.state, TcpState::FinWait1);
+                                conn.state = TcpState::FinWait1;
+                                conn.snd_nxt = conn.snd_nxt.wrapping_add(1); // FIN consumes 1 sequence number
+                            }
 
-                        // CRITICAL FIX: Guarantee the connection is removed from Wasm memory!
-                        pool.remove(&flow_key);
+                            len = write_tcp_reply(
+                                data_ptr,
+                                reply_src_mac, reply_dst_mac,
+                                flow_key.2, flow_key.3,
+                                flow_key.0, flow_key.1,
+                                snd_nxt, rcv_nxt, FLAG_FIN | FLAG_ACK
+                            );
 
-                        action = ROUTE_TX;
-                        action |= TM_FIN_GEN << 16;
-                        generated_reply = true;
-                    }                }
+                            inc_stat!(STAT_SENT_FIN);
+                            action = ROUTE_TX;
+                            generated_reply = true;
+
+                        } else {
+                            // ==========================================
+                            // THE SAFETY GUILLOTINE
+                            // ==========================================
+                            // If it timed out AGAIN while trying to close (e.g. stuck in FinWait1 for 5 seconds),
+                            // it means the remote server died or the cable was cut.
+                            // NOW we nuke the memory to prevent a permanent memory leak.
+                            log::debug!("TCP {:?} Guillotine: {:?} -> Removed", flow_key, state);
+                            pool.remove(&flow_key);
+                            inc_stat!(STAT_SENT_RST);
+
+                            // Send a final brutal RST to be safe
+                            len = write_tcp_reply(
+                                data_ptr,
+                                reply_src_mac, reply_dst_mac,
+                                flow_key.2, flow_key.3,
+                                flow_key.0, flow_key.1,
+                                snd_nxt, rcv_nxt, FLAG_RST | FLAG_ACK
+                            );
+
+                            action = ROUTE_TX;
+                            generated_reply = true;
+                        }
+                    }
+                }
 
                 // PRIORITY 2: Generate new SYNs
                 if !generated_reply {
@@ -264,6 +361,7 @@ impl Guest for TcpEngine {
                             let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
 
                             // 3. Register state so we can handle the SYN-ACK
+                            log::debug!("TCP {:?} Generator: New -> {:?}", flow_key, TcpState::SynSent);
                             pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1),0, CURRENT_TSC.get());
 
                             // 4. Write the packet
@@ -279,26 +377,26 @@ impl Guest for TcpEngine {
                                 their_ip, dst_port,
                                 isn, 0, FLAG_SYN
                             );
+                            inc_stat!(STAT_SENT_SYN);
                             action = ROUTE_TX;
-                            action |= TM_SYN_GEN << 16;
                             generated_reply = true;
                         }
                     }
                 }
                 // nothing generated, drop the tick
                 if !generated_reply {
+                    inc_stat!(STAT_DROP);
+                    inc_stat!(STAT_TICK_DROP);
                     action = ROUTE_DROP;
-                    action |= TM_DROP << 16;
                     len = 64;
                 }
             } else if pdu.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
                 // TCP FRAME
                 (action, len) = handle_tcp_packet(pdu, pool, &local_config, umem_addr);
-                action |= TM_TCP_REPLY << 16;
             } else {
                 // Not TCP -> Forward to standard Linux networking stack
+                inc_stat!(STAT_TO_LINUX);
                 action = ROUTE_LINUX;
-                action |= TM_LINUX << 16;
                 len = pdu.data_len();
             }
             actions.push(action);
@@ -416,6 +514,10 @@ impl Guest for TcpEngine {
             }
         }
     }
+
+    fn get_telemetry() -> Vec<u64> {
+        TCP_STATS.borrow().to_vec()
+    }
 }
 
 fn set_state(state: u8) {
@@ -526,19 +628,38 @@ fn handle_tcp_packet(
     let mut current_state = None;
 
     if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
+        let old_state = conn.state; // Capture state before processing
+
         action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len);
+
+        // Log if the state machine caused a transition
+        if old_state != conn.state {
+            log::debug!("TCP {:?} State: {:?} -> {:?}", flow_key, old_state, conn.state);
+        }
+
         current_state = Some(conn.state);
     } else {
-        if tcp_flags & FLAG_RST != 0 { return (ROUTE_DROP, 0); }
+        if tcp_flags & FLAG_RST != 0 {
+            inc_stat!(STAT_RECV_RST);
+            return (ROUTE_DROP, 0);
+        }
 
         if tcp_flags & FLAG_SYN != 0 {
+            inc_stat!(STAT_RECV_SYN);
             let rcv_nxt = seq_num.wrapping_add(1);
             let initial_snd_nxt = 1000u32;
+            // Log the birth of a new passively-received connection
+            log::debug!("TCP {:?} State: New -> {:?}", flow_key, TcpState::SynReceived);
             pool.insert(flow_key, TcpState::SynReceived, initial_snd_nxt.wrapping_add(1), rcv_nxt, current_tsc);
+
+            inc_stat!(STAT_SENT_SYNACK);
             action_opt = Some((FLAG_SYN | FLAG_ACK, initial_snd_nxt, rcv_nxt));
         } else {
+            inc_stat!(STAT_UNEXPECTED);
             let reply_seq = if tcp_flags & FLAG_ACK != 0 { ack_num } else { 0 };
             let reply_ack = seq_num.wrapping_add(payload_len).wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
+
+            inc_stat!(STAT_SENT_RST); // We are dropping the connection by sending RST
             action_opt = Some((FLAG_RST | FLAG_ACK, reply_seq, reply_ack));
         }
     }
@@ -549,9 +670,7 @@ fn handle_tcp_packet(
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
         let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
 
-        // DYNAMIC MAC SWAPPING:
-        // We reply TO the physical MAC that sent this packet.
-        // We send FROM our configured MAC (fallback to the MAC they addressed).
+        // DYNAMIC MAC SWAPPING
         let reply_dst_mac = incoming_src_mac;
         let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
 
@@ -579,14 +698,36 @@ fn run_tcp_state_machine(
 
     // Fast-path: Reset drops connection instantly
     if tcp_flags & FLAG_RST != 0 {
+        inc_stat!(STAT_RECV_RST);
         conn.state = TcpState::Closed;
         return None;
+    }
+
+    // ==========================================
+    // INCOMING PACKET TRACKING
+    // ==========================================
+    if tcp_flags & FLAG_FIN != 0 {
+        inc_stat!(STAT_RECV_FIN);
+    } else if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 {
+        inc_stat!(STAT_RECV_SYNACK);
+    } else if payload_len > 0 {
+        inc_stat!(STAT_RECV_PAYLOAD);
+    } else if tcp_flags & FLAG_ACK != 0 {
+        // Categorize the ACK based on our current state
+        match conn.state {
+            TcpState::SynReceived => inc_stat!(STAT_RECV_SYNACK2),
+            TcpState::FinWait1 | TcpState::LastAck | TcpState::Closing => inc_stat!(STAT_RECV_ACK4FIN),
+            _ => inc_stat!(STAT_RECV_ACK),
+        }
     }
 
     macro_rules! reply {
         ($flags:expr) => { Some(($flags, conn.snd_nxt, conn.rcv_nxt)) }
     }
 
+    // ==========================================
+    // STATE TRANSITIONS & OUTGOING TRACKING
+    // ==========================================
     match conn.state {
         TcpState::Listen => {
             if tcp_flags & FLAG_SYN != 0 {
@@ -594,17 +735,19 @@ fn run_tcp_state_machine(
                 conn.rcv_nxt = seq_num.wrapping_add(1);
                 let send_seq = conn.snd_nxt;
                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+                inc_stat!(STAT_SENT_SYNACK);
                 return Some((FLAG_SYN | FLAG_ACK, send_seq, conn.rcv_nxt));
             }
         }
         TcpState::SynSent => {
             if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 {
-                // The server acknowledged our SYN!
                 if ack_num == conn.snd_nxt {
                     conn.state = TcpState::Established;
                     conn.rcv_nxt = seq_num.wrapping_add(1);
-                    return reply!(FLAG_ACK); // Complete the 3-way handshake
+                    inc_stat!(STAT_SENT_SYNACK2); // Final ACK of the 3-way handshake
+                    return reply!(FLAG_ACK);
                 } else {
+                    inc_stat!(STAT_SENT_RST);
                     return Some((FLAG_RST, ack_num, 0)); // Bad ACK sequence
                 }
             } else if tcp_flags & FLAG_RST != 0 {
@@ -622,21 +765,27 @@ fn run_tcp_state_machine(
                 conn.rcv_nxt = seq_num.wrapping_add(1).wrapping_add(payload_len);
                 let send_seq = conn.snd_nxt;
                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+
+                inc_stat!(STAT_SENT_FIN_PSSV);
+                inc_stat!(STAT_SENT_ACK4FIN);
                 return Some((FLAG_FIN | FLAG_ACK, send_seq, conn.rcv_nxt));
             } else if tcp_flags & FLAG_ACK != 0 && payload_len > 0 {
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
+
+                inc_stat!(STAT_SENT_ACK); // Pure data acknowledgment
                 return reply!(FLAG_ACK);
             }
         }
         TcpState::FinWait1 => {
             if tcp_flags & FLAG_FIN != 0 && tcp_flags & FLAG_ACK != 0 {
-                // conn.state = TcpState::TimeWait;
                 conn.state = TcpState::Closed;
                 conn.rcv_nxt = seq_num.wrapping_add(1);
+                inc_stat!(STAT_SENT_ACK4FIN);
                 return reply!(FLAG_ACK);
             } else if tcp_flags & FLAG_FIN != 0 {
                 conn.state = TcpState::Closing;
                 conn.rcv_nxt = seq_num.wrapping_add(1);
+                inc_stat!(STAT_SENT_ACK4FIN);
                 return reply!(FLAG_ACK);
             } else if tcp_flags & FLAG_ACK != 0 {
                 conn.state = TcpState::FinWait2;
@@ -644,15 +793,14 @@ fn run_tcp_state_machine(
         }
         TcpState::FinWait2 => {
             if tcp_flags & FLAG_FIN != 0 {
-                // conn.state = TcpState::TimeWait;
                 conn.state = TcpState::Closed;
                 conn.rcv_nxt = seq_num.wrapping_add(1);
+                inc_stat!(STAT_SENT_ACK4FIN);
                 return reply!(FLAG_ACK);
             }
         }
         TcpState::Closing => {
             if tcp_flags & FLAG_ACK != 0 {
-                // conn.state = TcpState::TimeWait;
                 conn.state = TcpState::Closed;
             }
         }
@@ -663,6 +811,7 @@ fn run_tcp_state_machine(
         }
         TcpState::Closed => {
             if tcp_flags & FLAG_RST == 0 {
+                inc_stat!(STAT_SENT_RST);
                 return Some((FLAG_RST | FLAG_ACK, 0, seq_num.wrapping_add(payload_len)));
             }
         }
