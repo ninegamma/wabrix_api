@@ -95,7 +95,8 @@ impl ConnectionPool {
             new_idx
         };
 
-        self.map.insert(key, index);
+        let v= self.map.insert(key, index);
+        if v.is_some() { log::warn!("Btree contains already connection key: {:?}", key); }
         self.push_tail(index);
     }
 

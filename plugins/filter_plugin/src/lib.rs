@@ -4,7 +4,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::slice;
 use xbricks_protocol::headers::HeaderKind;
-use xbricks_protocol::wbatch::Pdu0;
+use xbricks_protocol::wpdu::{Packet, Pdu0};
 use crate::exports::xbricks::plugins::inspector::{Guest};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -31,10 +31,10 @@ struct MyInspector;
 impl Guest for MyInspector {
     fn init_data(_data: Vec<(alloc::string::String, alloc::string::String)>) {}
 
-    fn inspect_batch(batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
+    fn inspect_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
         let pdus = unsafe {
-            slice::from_raw_parts(
-                batch_bytes.as_ptr() as *const Pdu0,
+            slice::from_raw_parts_mut(
+                batch_bytes.as_mut_ptr() as *mut Pdu0,
                 batch_bytes.len() / core::mem::size_of::<Pdu0>(),
             )
         };
@@ -46,30 +46,18 @@ impl Guest for MyInspector {
         let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
 
         for pdu in pdus {
-            //let mut action = TELEMETRY_FLAG;
+            // Wrap the raw PDU in a safe Packet Context Wrapper
+            let packet = Packet::new(pdu, umem_addr);
             let mut action = 0u32;
 
-            let mut is_v4 = false;
-            let mut dst_port = None;
-            // pdu.base_addr does: umem_addr + desc_addr
-            // (-10MB) + 11MB = 1MB! (The exact correct Wasm array index!)
-            let base_addr = pdu.base_addr(umem_addr);
-            // SINGLE PASS: Iterate backwards to find L4 ports instantly,
-            // and just verify IPv4 exists along the way.
-            let header_count = pdu.headers().count();
-            for i in (0..header_count).rev() {
-                let kind = pdu.headers().kinds[i]; // Direct array access!
-
-                if kind == HeaderKind::Ip {
-                    is_v4 = true;
-                } else if dst_port.is_none() {
-                    if kind == HeaderKind::Tcp {
-                        dst_port = Some(pdu.headers().tcp(base_addr, i).dst_port());
-                    } else if kind == HeaderKind::Udp {
-                        dst_port = Some(pdu.headers().udp(base_addr, i).dst_port());
-                    }
-                }
-            }
+            let is_v4 = packet.ipv4_header().is_some();
+            let dst_port = if let Some(tcp) = packet.tcp_header() {
+                Some(tcp.dst_port())
+            } else if let Some(udp) = packet.udp_header() {
+                Some(udp.dst_port())
+            } else {
+                None
+            };
 
             // Execute Routing Logic
             if is_v4 && dst_port.is_some() {

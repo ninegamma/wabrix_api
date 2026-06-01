@@ -8,10 +8,10 @@ use macaddr::MacAddr6;
 use core::net::Ipv4Addr;
 use spin::Mutex; // <-- idiomatic no_std lock
 use xbricks_protocol::headers::{IpHeader, MacHeader, TcpHeader};
-use xbricks_protocol::wbatch::Pdu0;
 use crate::exports::xbricks::plugins::generator::Guest;
 use network_types::eth::EtherType;
 use xbricks_protocol::helpers::{parse_ip, parse_mac};
+use xbricks_protocol::wpdu::Pdu0;
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({

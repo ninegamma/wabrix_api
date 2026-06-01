@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::slice;
 use core::sync::atomic::{AtomicU64, Ordering};
 use xbricks_protocol::headers::{HeaderKind};
-use xbricks_protocol::wbatch::Pdu0;
+use xbricks_protocol::wpdu::Pdu0;
 use crate::exports::xbricks::plugins::inspector::Guest;
 
 // Point this to the EXACT SAME .wit file you used for your first plugin!

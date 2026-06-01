@@ -4,7 +4,7 @@ pub mod connections;
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::ptr;
+use core::{ptr, slice};
 use core::cell::{Cell, RefCell};
 
 use network_types::eth::EtherType;
@@ -14,7 +14,7 @@ use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
 use xbricks_protocol::headers::hstack::HeaderStack;
 use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
 use xbricks_protocol::{PluginOpcode, StandardOpcode};
-use xbricks_protocol::wbatch::Pdu0;
+use xbricks_protocol::wpdu::{Packet, PacketBatch, Pdu0};
 use crate::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::xbricks::plugins::packet_engine::Guest;
 use crate::xbricks::plugins::logging;
@@ -184,7 +184,7 @@ pub fn init_logging() {
     // or Box::new if required by the log crate version.
     static LOGGER: HostLogger = HostLogger;
     let _ = log::set_logger(&LOGGER);
-    log::set_max_level(log::LevelFilter::Debug); // Set your desired Wasm log level
+    log::set_max_level(log::LevelFilter::Info); // Set your desired Wasm log level
 }
 
 fn init_state_machine() {
@@ -218,19 +218,19 @@ impl Guest for TcpEngine {
     }
 
     fn process_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> (Vec<u32>, Vec<u32>) {
-        let pdus = Pdu0::slice_from_bytes(&mut batch_bytes);
 
+        let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
         let local_config = CONFIG.borrow().clone().unwrap_or_default();
 
         // =======================================================
         // Fast-Path Bypass
         // =======================================================
         if local_config.bypass {
-            let mut actions = Vec::with_capacity(pdus.len());
-            let mut lengths = Vec::with_capacity(pdus.len());
-            for pdu in pdus.iter() {
-                // Route everything to Linux and drop ticks
-                let action = if pdu.is_a_tick(0) {
+            let mut actions = Vec::with_capacity(batch.len());
+            let mut lengths = Vec::with_capacity(batch.len());
+            for mut packet in batch.iter_mut() {
+                // 2. Wrap PDU to cleanly check for ticks
+                let action = if packet.is_a_tick() {
                     inc_stat!(STAT_DROP);
                     inc_stat!(STAT_TICK_DROP);
                     ROUTE_DROP
@@ -239,25 +239,23 @@ impl Guest for TcpEngine {
                     ROUTE_LINUX
                 };
                 actions.push(action);
-                lengths.push(pdu.data_len());
+                lengths.push(packet.data_len());
             }
             return (actions, lengths);
         }
         // =======================================================
 
-        let mut actions = Vec::with_capacity(pdus.len());
-        let mut lengths = Vec::with_capacity(pdus.len());
-        let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
+        let mut actions = Vec::with_capacity(batch.len());
+        let mut lengths = Vec::with_capacity(batch.len());
 
         // Lock Global States ONCE per batch
         let mut connections_guard = CONNECTIONS.borrow_mut();
         let pool = connections_guard.as_mut().expect("Table uninitialized");
-        let local_config = CONFIG.borrow().clone().unwrap_or_default();
 
-        for pdu in pdus.iter_mut() {
+        for mut packet in batch.iter_mut() {
             let mut action = 0;
             let mut len = 64;
-            if pdu.is_a_tick(umem_addr) {
+            if packet.is_a_tick() {
                 let mut generated_reply = false;
 
                 // PRIORITY 1: Process Timeout Teardowns
@@ -268,113 +266,75 @@ impl Guest for TcpEngine {
 
                 if let Some(flow_key) = pending_timeout {
                     let current_tsc = CURRENT_TSC.get();
-
-                    // 1. Extract state using `get_mut_and_touch`.
-                    // This automatically bumps the timestamp so it gets a fresh 5-second window to close!
                     let (snd_nxt, rcv_nxt, state, exists) = if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
                         (conn.snd_nxt, conn.rcv_nxt, conn.state, true)
                     } else {
                         (0, 0, TcpState::Closed, false)
                     };
-                    log::debug!("TCP {:?} Timeout: state= {:?}, exist={:?}", flow_key, state, exists);
+
                     if exists {
-                        let data_ptr = pdu.data_ptr(umem_addr);
+                        let data_ptr = packet.data_ptr_mut();
                         let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                         let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
                         if state == TcpState::Established || state == TcpState::SynReceived {
-                            // ==========================================
-                            // THE POLITE CLOSE (RFC 793)
-                            // ==========================================
-                            // We re-borrow to update the state safely
                             if let Some(conn) = pool.get_mut(&flow_key) {
-                                log::debug!("TCP {:?} Timeout: {:?} -> {:?}", flow_key, conn.state, TcpState::FinWait1);
                                 conn.state = TcpState::FinWait1;
-                                conn.snd_nxt = conn.snd_nxt.wrapping_add(1); // FIN consumes 1 sequence number
+                                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                             }
-
                             len = write_tcp_reply(
-                                data_ptr,
-                                reply_src_mac, reply_dst_mac,
-                                flow_key.2, flow_key.3,
-                                flow_key.0, flow_key.1,
+                                data_ptr, reply_src_mac, reply_dst_mac,
+                                flow_key.2, flow_key.3, flow_key.0, flow_key.1,
                                 snd_nxt, rcv_nxt, FLAG_FIN | FLAG_ACK
                             );
-
                             inc_stat!(STAT_SENT_FIN);
                             action = ROUTE_TX;
                             generated_reply = true;
-
                         } else {
-                            // ==========================================
-                            // THE SAFETY GUILLOTINE
-                            // ==========================================
-                            // If it timed out AGAIN while trying to close (e.g. stuck in FinWait1 for 5 seconds),
-                            // it means the remote server died or the cable was cut.
-                            // NOW we nuke the memory to prevent a permanent memory leak.
-                            log::debug!("TCP {:?} Guillotine: {:?} -> Removed", flow_key, state);
                             pool.remove(&flow_key);
                             inc_stat!(STAT_SENT_RST);
-
-                            // Send a final brutal RST to be safe
                             len = write_tcp_reply(
-                                data_ptr,
-                                reply_src_mac, reply_dst_mac,
-                                flow_key.2, flow_key.3,
-                                flow_key.0, flow_key.1,
+                                data_ptr, reply_src_mac, reply_dst_mac,
+                                flow_key.2, flow_key.3, flow_key.0, flow_key.1,
                                 snd_nxt, rcv_nxt, FLAG_RST | FLAG_ACK
                             );
-
                             action = ROUTE_TX;
                             generated_reply = true;
                         }
                     }
                 }
-
                 // PRIORITY 2: Generate new SYNs
                 if !generated_reply {
                     let syn_rate = local_config.syn_rate.unwrap_or(0);
                     if syn_rate > 0 {
                         let mut gen = SYN_GEN.borrow_mut();
-
-                        // Check if we are still allowed to send
                         let allowed_to_send = gen.activated && match local_config.syn_limit {
                             Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
-                            None => true, // Infinite generation if no limit provided
+                            None => true,
                         };
 
                         if allowed_to_send {
-                            gen.syns_sent += 1; // Increment the generated count!
-
-                            // 1. Generate LCG Random ISN
+                            gen.syns_sent += 1;
                             gen.prng_state = gen.prng_state.wrapping_mul(1664525).wrapping_add(1013904223);
                             let isn = gen.prng_state;
 
-                            // 2. Assign Source Port
                             let src_port = gen.port_counter;
                             gen.port_counter = if gen.port_counter >= PORT_END_RANGE { PORT_START_RANGE } else { gen.port_counter + 1 };
 
-                            let dst_port = 80; // Target port (e.g., HTTP)
+                            let dst_port = 80;
                             let our_ip = u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
                             let their_ip = u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
 
                             let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
+                            pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1), 0, CURRENT_TSC.get());
 
-                            // 3. Register state so we can handle the SYN-ACK
-                            log::debug!("TCP {:?} Generator: New -> {:?}", flow_key, TcpState::SynSent);
-                            pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1),0, CURRENT_TSC.get());
-
-                            // 4. Write the packet
-                            let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
-
+                            let data_ptr = packet.data_ptr_mut();
                             let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                             let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
                             len = write_tcp_reply(
-                                data_ptr,
-                                reply_src_mac, reply_dst_mac,
-                                our_ip, src_port,
-                                their_ip, dst_port,
+                                data_ptr, reply_src_mac, reply_dst_mac,
+                                our_ip, src_port, their_ip, dst_port,
                                 isn, 0, FLAG_SYN
                             );
                             inc_stat!(STAT_SENT_SYN);
@@ -390,14 +350,13 @@ impl Guest for TcpEngine {
                     action = ROUTE_DROP;
                     len = 64;
                 }
-            } else if pdu.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
-                // TCP FRAME
-                (action, len) = handle_tcp_packet(pdu, pool, &local_config, umem_addr);
+            } else if packet.pdu.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
+                // TCP FRAME - Delegate to the clean state machine
+                (action, len) = handle_tcp_packet(&mut packet, pool, &local_config);
             } else {
-                // Not TCP -> Forward to standard Linux networking stack
                 inc_stat!(STAT_TO_LINUX);
                 action = ROUTE_LINUX;
-                len = pdu.data_len();
+                len = packet.data_len();
             }
             actions.push(action);
             lengths.push(len);
@@ -551,61 +510,61 @@ fn set_state(state: u8) {
 }
 
 fn flush_state(mode: u8) {
-    // 1. Clear the connection pool by dropping the old one and allocating a fresh one.
+
+    // This stops the generator and prevents a new run from starting automatically.
+    set_state(0);
+
+    // Clear the connection pool by dropping the old one and allocating a fresh one.
     // This instantly frees all tracked connections.
     init_state_machine();
 
-    // 2. Clear the pending timeout teardowns so we don't send FINs for connections
+    // Clear the pending timeout teardowns so we don't send FINs for connections
     // that just got wiped out.
     TIMEOUT_QUEUE.borrow_mut().clear();
 
-    // 3. Reset the SYN generator tracking
-    let mut syn_gen = SYN_GEN.borrow_mut();
-    syn_gen.syns_sent = 0;
-    syn_gen.cycle_accumulator = 0;
-    syn_gen.last_tsc = 0;
+    // Reset the SYN generator tracking
+    {
+        let mut syn_gen = SYN_GEN.borrow_mut();
+        syn_gen.syns_sent = 0;
+        syn_gen.cycle_accumulator = 0;
+        syn_gen.last_tsc = 0;
 
-    // Optional: If mode == 1 (Hard Reset), also reset the PRNG and Port Counter
-    // to ensure perfectly repeatable PCAP generation across test runs.
-    if mode == 1 {
-        syn_gen.port_counter = PORT_START_RANGE;
-        syn_gen.prng_state = 1;
+        // Optional: If mode == 1 (Hard Reset), also reset the PRNG and Port Counter
+        // to ensure perfectly repeatable PCAP generation across test runs.
+        if mode == 1 {
+            syn_gen.port_counter = PORT_START_RANGE;
+            syn_gen.prng_state = 1;
+        }
     }
+
+    // 5. Clear all telemetry counters
+    *TCP_STATS.borrow_mut() = [0; STAT_COUNT];
 
     log::info!("TCP Engine state flushed (mode: {})", mode);
 }
 
 /// Extracts protocol data, runs the state machine, and formats replies
 fn handle_tcp_packet(
-    pdu: &mut Pdu0,
+    packet: &mut Packet,
     pool: &mut ConnectionPool,
     config: &EngineConfig,
-    umem_addr: usize,
 ) -> (u32, u32) {
     let current_tsc = CURRENT_TSC.get();
-    let base_addr = pdu.base_addr(umem_addr);
-    let headers = pdu.headers();
 
-    // Find header indices safely
-    let mut mac_idx = None;
-    let mut ip_idx = None;
-    let mut tcp_idx = None;
-    for i in 0..headers.count() {
-        if headers.kinds[i] == HeaderKind::Mac { mac_idx = Some(i); }
-        if headers.kinds[i] == HeaderKind::Ip { ip_idx = Some(i); }
-        if headers.kinds[i] == HeaderKind::Tcp { tcp_idx = Some(i); }
-    }
-
-    let (mac_i, ip_i, tcp_i) = match (mac_idx, ip_idx, tcp_idx) {
-        (Some(m), Some(i), Some(t)) => (m, i, t),
-        _ => return (ROUTE_LINUX, pdu.data_len()), // Forward malformed
+    // Safely extract the strongly-typed headers using the Context Wrapper
+    let mac_hdr = match packet.mac_header() {
+        Some(m) => m,
+        None => return (ROUTE_LINUX, packet.data_len()),
+    };
+    let ip_hdr = match packet.ipv4_header() {
+        Some(i) => i,
+        None => return (ROUTE_LINUX, packet.data_len()),
+    };
+    let tcp_hdr = match packet.tcp_header() {
+        Some(t) => t,
+        None => return (ROUTE_LINUX, packet.data_len()),
     };
 
-    let mac_hdr = headers.mac(base_addr, mac_i);
-    let ip_hdr = headers.ip(base_addr, ip_i);
-    let tcp_hdr = headers.tcp(base_addr, tcp_i);
-
-    // EXTRACT INCOMING MACS
     let incoming_src_mac = mac_hdr.src.into_array();
     let incoming_dst_mac = mac_hdr.dst.into_array();
 
@@ -628,28 +587,17 @@ fn handle_tcp_packet(
     let mut current_state = None;
 
     if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
-        let old_state = conn.state; // Capture state before processing
-
         action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len);
-
-        // Log if the state machine caused a transition
-        if old_state != conn.state {
-            log::debug!("TCP {:?} State: {:?} -> {:?}", flow_key, old_state, conn.state);
-        }
-
         current_state = Some(conn.state);
     } else {
         if tcp_flags & FLAG_RST != 0 {
             inc_stat!(STAT_RECV_RST);
             return (ROUTE_DROP, 0);
         }
-
         if tcp_flags & FLAG_SYN != 0 {
             inc_stat!(STAT_RECV_SYN);
             let rcv_nxt = seq_num.wrapping_add(1);
             let initial_snd_nxt = 1000u32;
-            // Log the birth of a new passively-received connection
-            log::debug!("TCP {:?} State: New -> {:?}", flow_key, TcpState::SynReceived);
             pool.insert(flow_key, TcpState::SynReceived, initial_snd_nxt.wrapping_add(1), rcv_nxt, current_tsc);
 
             inc_stat!(STAT_SENT_SYNACK);
@@ -659,26 +607,21 @@ fn handle_tcp_packet(
             let reply_seq = if tcp_flags & FLAG_ACK != 0 { ack_num } else { 0 };
             let reply_ack = seq_num.wrapping_add(payload_len).wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
 
-            inc_stat!(STAT_SENT_RST); // We are dropping the connection by sending RST
+            inc_stat!(STAT_SENT_RST);
             action_opt = Some((FLAG_RST | FLAG_ACK, reply_seq, reply_ack));
         }
     }
 
     if current_state == Some(TcpState::Closed) { pool.remove(&flow_key); }
 
-    // 3. FORMAT REPLY
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
-        let data_ptr = pdu.data_ptr(umem_addr) as *mut u8;
-
-        // DYNAMIC MAC SWAPPING
+        let data_ptr = packet.data_ptr_mut();
         let reply_dst_mac = incoming_src_mac;
         let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
 
         let len = write_tcp_reply(
-            data_ptr,
-            reply_src_mac, reply_dst_mac,
-            dst_ip, dst_port, // New Src (Us)
-            src_ip, src_port, // New Dst (Them)
+            data_ptr, reply_src_mac, reply_dst_mac,
+            dst_ip, dst_port, src_ip, src_port,
             reply_seq, reply_ack, reply_flags
         );
         return (ROUTE_TX, len);
@@ -823,7 +766,7 @@ fn run_tcp_state_machine(
 
 /// Formats the outbound headers back into WASM linear memory
 fn write_tcp_reply(
-    wasm_ptr: *mut u8,
+    data_ptr: *mut u8,
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
     src_ip: u32,
@@ -871,9 +814,9 @@ fn write_tcp_reply(
     let tcp_size = core::mem::size_of::<TcpHeader>();
 
     unsafe {
-        ptr::copy_nonoverlapping(&mac, wasm_ptr as *mut MacHeader, 1);
-        ptr::copy_nonoverlapping(&ip, wasm_ptr.add(mac_size) as *mut IpHeader, 1);
-        ptr::copy_nonoverlapping(&tcp, wasm_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
+        ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
+        ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size) as *mut IpHeader, 1);
+        ptr::copy_nonoverlapping(&tcp, data_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
     }
 
     (mac_size + ip_size + tcp_size) as u32
