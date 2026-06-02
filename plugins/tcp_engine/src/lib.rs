@@ -11,7 +11,7 @@ use network_types::eth::EtherType;
 use macaddr::MacAddr6;
 
 use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
-use xbricks_protocol::headers::hstack::HeaderStack;
+//use xbricks_protocol::hstack::HeaderStack;
 use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
 use xbricks_protocol::{PluginOpcode, StandardOpcode};
 use xbricks_protocol::packet::{Packet, PacketBatch};
@@ -350,7 +350,7 @@ impl Guest for TcpEngine {
                     action = ROUTE_DROP;
                     len = 64;
                 }
-            } else if packet.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
+            } else if packet.headers().fingerprint() == Packet::TCP_OVER_IPV4 {
                 // TCP FRAME - Delegate to the clean state machine
                 (action, len) = handle_tcp_packet(&mut packet, pool, &local_config);
             } else {

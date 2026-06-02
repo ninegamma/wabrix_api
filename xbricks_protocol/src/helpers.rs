@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use log::trace;
 use crate::headers::{EndOffset, TcpHeader};
 use crate::headers::check::ipv4_checksum;
-use crate::wpdu::WPdu;
+use crate::exports::WPdu;
 
 
 #[inline]

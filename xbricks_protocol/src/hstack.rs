@@ -66,11 +66,6 @@ impl HeaderStack {
         f
     }
 
-    /// Then comparison becomes a single integer check:
-    /// if pdu.header_stack.fingerprint() == TCP_OVER_IPV4 { ... }
-    pub const TCP_OVER_IPV4: u32 = (HeaderKind::Mac as u32) |
-        ((HeaderKind::Ip as u32) << 4) |
-        ((HeaderKind::Tcp as u32) << 8);
 
 
     #[inline]

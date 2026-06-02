@@ -7,7 +7,8 @@ pub mod packet;
 mod wpdu_impl;
 // Declare the routing module as public.
 // (It will decide internally what to actually export).
-pub mod wpdu;
+pub mod exports;
+mod hstack;
 
 pub const TELEMETRY_FLAG: u32  = 1 << 8; // Bit 8
 

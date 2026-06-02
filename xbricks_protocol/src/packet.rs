@@ -1,8 +1,8 @@
 
 use core::slice;
-use crate::headers::hstack::HeaderStack;
+use crate::hstack::HeaderStack;
 use crate::headers::{ArpIpv4Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader};
-use crate::wpdu::WPdu;
+use crate::exports::WPdu;
 
 /// The safe, high-level interface
 pub struct Packet<'a> {
@@ -11,9 +11,16 @@ pub struct Packet<'a> {
 }
 
 impl<'a> Packet<'a> {
+    
+    /// if headers().fingerprint() == TCP_OVER_IPV4 { ... }
+    pub const TCP_OVER_IPV4: u32 = (HeaderKind::Mac as u32) |
+        ((HeaderKind::Ip as u32) << 4) |
+        ((HeaderKind::Tcp as u32) << 8);
+
+
     /// Internal constructor used by your host engine, NOT the third party.
     #[inline(always)]
-    pub(crate) fn new(pdu: &'a mut WPdu, umem_base: usize) -> Self {
+    pub fn new(pdu: &'a mut WPdu, umem_base: usize) -> Self {
         Self { pdu, umem_base }
     }
 

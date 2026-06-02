@@ -1,5 +1,5 @@
 use core::ptr;
-use crate::headers::hstack::HeaderStack;
+use crate::hstack::HeaderStack;
 use crate::headers::{
     ArpIpv4Header, EndOffset, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader,
     MAC_HDR_SIZE,
@@ -10,7 +10,7 @@ use crate::headers::{
 #[derive(Clone, Debug)]
 pub struct WPdu {
     /// 16 Bytes: HeaderStack
-    pub(crate) header_stack: HeaderStack,
+    pub header_stack: HeaderStack,
 
     /// 8 Bytes: The data pointer (absolute UMEM offset)
     /// Corresponds to FrameDesc.addr
