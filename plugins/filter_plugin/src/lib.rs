@@ -4,7 +4,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::slice;
 use xbricks_protocol::headers::HeaderKind;
-use xbricks_protocol::wpdu::{Packet, Pdu0};
+use xbricks_protocol::packet::PacketBatch;
 use crate::exports::xbricks::plugins::inspector::{Guest};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -32,22 +32,10 @@ impl Guest for MyInspector {
     fn init_data(_data: Vec<(alloc::string::String, alloc::string::String)>) {}
 
     fn inspect_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
-        let pdus = unsafe {
-            slice::from_raw_parts_mut(
-                batch_bytes.as_mut_ptr() as *mut Pdu0,
-                batch_bytes.len() / core::mem::size_of::<Pdu0>(),
-            )
-        };
-
-        let mut actions = Vec::with_capacity(pdus.len());
-
-        // MAGIC: Calculate the virtual UMEM address for this sandbox.
-        // E.g., if partition is 10MB, this becomes -10MB (in 2's complement).
-        let umem_addr = (0u32).wrapping_sub(partition_offset) as usize;
-
-        for pdu in pdus {
-            // Wrap the raw PDU in a safe Packet Context Wrapper
-            let packet = Packet::new(pdu, umem_addr);
+        let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
+        let mut actions = Vec::with_capacity(batch.len());
+        
+        for packet in batch.iter_mut() {
             let mut action = 0u32;
 
             let is_v4 = packet.ipv4_header().is_some();

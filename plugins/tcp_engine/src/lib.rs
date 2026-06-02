@@ -14,7 +14,7 @@ use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
 use xbricks_protocol::headers::hstack::HeaderStack;
 use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
 use xbricks_protocol::{PluginOpcode, StandardOpcode};
-use xbricks_protocol::wpdu::{Packet, PacketBatch, Pdu0};
+use xbricks_protocol::packet::{Packet, PacketBatch};
 use crate::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::xbricks::plugins::packet_engine::Guest;
 use crate::xbricks::plugins::logging;
@@ -350,7 +350,7 @@ impl Guest for TcpEngine {
                     action = ROUTE_DROP;
                     len = 64;
                 }
-            } else if packet.pdu.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
+            } else if packet.headers().fingerprint() == HeaderStack::TCP_OVER_IPV4 {
                 // TCP FRAME - Delegate to the clean state machine
                 (action, len) = handle_tcp_packet(&mut packet, pool, &local_config);
             } else {

@@ -1,9 +1,13 @@
 #![no_std]
 extern crate alloc;
-
 pub mod headers;
-pub mod wpdu;
 pub mod helpers;
+pub mod packet;
+// Declare the implementation file, but keep it hidden from the outside world.
+mod wpdu_impl;
+// Declare the routing module as public.
+// (It will decide internally what to actually export).
+pub mod wpdu;
 
 pub const TELEMETRY_FLAG: u32  = 1 << 8; // Bit 8
 

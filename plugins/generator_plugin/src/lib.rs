@@ -11,7 +11,7 @@ use xbricks_protocol::headers::{IpHeader, MacHeader, TcpHeader};
 use crate::exports::xbricks::plugins::generator::Guest;
 use network_types::eth::EtherType;
 use xbricks_protocol::helpers::{parse_ip, parse_mac};
-use xbricks_protocol::wpdu::Pdu0;
+use xbricks_protocol::packet::PacketBatch;
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
@@ -107,7 +107,7 @@ impl Guest for MyGenerator {
     }
 
     fn generate_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
-        let pdus = Pdu0::slice_from_bytes(&mut batch_bytes);
+        let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
 
         let worker_id = WORKER_ID.load(Ordering::Relaxed) as u16;
         let mut seq = SEQ_COUNTER.load(Ordering::Relaxed);
@@ -119,7 +119,7 @@ impl Guest for MyGenerator {
         let dst_ip = Ipv4Addr::from(config.dst_ip.unwrap_or([192, 168, 177, 222]));
         let base_src_ip = config.src_ip.unwrap_or([192, 168, 177, 2]);
 
-        let lengths: Vec<u32> = pdus.iter_mut().map(|pdu| {
+        let lengths: Vec<u32> = batch.iter_mut().map(|mut packet| {
             // 1. Calculate dynamic fields per-packet
             let src_ip_u32 = if let Some(seed) = config.rng_seed {
                 let new_seed = fast_rand(seed);
@@ -155,7 +155,7 @@ impl Guest for MyGenerator {
             tcp.set_seq_num(seq);
 
             // 5. Serialize directly into Wasm memory
-            let len = pdu.write_tcp_ipv4_headers(&mac, &ip, &tcp, partition_offset);
+            let len = packet.write_tcp_ipv4_headers(&mac, &ip, &tcp);
 
             seq = seq.wrapping_add(1);
             len

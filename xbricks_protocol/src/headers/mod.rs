@@ -297,9 +297,7 @@ impl fmt::Display for HeaderPtr {
 
 fn test_headers() {
     let mut ip_header = IpHeader::new();
-    //println!("ip_header= {:?}", ip_header);
     let header = Header::Ip(&mut ip_header);
-    //println!("header= {}, header.kind= {:?}", header, header.kind());
     assert_eq!(header.kind(), HeaderKind::Ip);
     assert!(header.as_ip().is_some());
     assert!(header.as_mac().is_none());
