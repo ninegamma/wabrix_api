@@ -91,6 +91,8 @@ struct SynGenerator {
     last_tsc: u64,
     cycle_accumulator: u128,
     port_counter: u16,
+    /// if ports are exhausted, we increase the IP address
+    ip_offset: u32,
     /// Simple seed for ISNs
     prng_state: u32,
     /// Track total SYNs generated
@@ -105,6 +107,7 @@ static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
     last_tsc: 0,
     cycle_accumulator: 0,
     port_counter: PORT_START_RANGE,
+    ip_offset: 0,
     prng_state: 1,
     syns_sent: 0,
     activated: false,
@@ -167,8 +170,7 @@ impl log::Log for HostLogger {
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
             // Format the message using the alloc crate
-            let msg = alloc::format!("{}", record.args());
-
+            let msg = alloc::format!("tcp_engine: {}", record.args());
             // Call the WIT-generated host function.
             // The path matches your package: xbricks:plugins/logging
             logging::log(record.level() as u32, &msg);
@@ -188,8 +190,10 @@ pub fn init_logging() {
 }
 
 fn init_state_machine() {
-    // 65536 is a good default capacity to prevent re-allocations
-    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(65536));
+    // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
+    // but it will NEVER trigger a resize or memory.grow during execution.
+    //*CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(524_288));
+    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(50_000));
 }
 
 struct TcpEngine;
@@ -319,10 +323,18 @@ impl Guest for TcpEngine {
                             let isn = gen.prng_state;
 
                             let src_port = gen.port_counter;
-                            gen.port_counter = if gen.port_counter >= PORT_END_RANGE { PORT_START_RANGE } else { gen.port_counter + 1 };
+                            let base_ip = u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
+                            let our_ip = base_ip.wrapping_add(gen.ip_offset);
+
+                            if gen.port_counter >= PORT_END_RANGE {
+                                gen.port_counter = PORT_START_RANGE;
+                                // Shift to the next IP address (cycle through 250 IPs)
+                                gen.ip_offset = (gen.ip_offset + 1) % 250;
+                            } else {
+                                gen.port_counter += 1;
+                            }
 
                             let dst_port = 80;
-                            let our_ip = u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
                             let their_ip = u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
 
                             let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
@@ -514,9 +526,10 @@ fn flush_state(mode: u8) {
     // This stops the generator and prevents a new run from starting automatically.
     set_state(0);
 
-    // Clear the connection pool by dropping the old one and allocating a fresh one.
-    // This instantly frees all tracked connections.
-    init_state_machine();
+    // Clear the pool in-place instead of re-allocating
+    if let Some(pool) = CONNECTIONS.borrow_mut().as_mut() {
+        pool.clear();
+    }
 
     // Clear the pending timeout teardowns so we don't send FINs for connections
     // that just got wiped out.
@@ -594,7 +607,16 @@ fn handle_tcp_packet(
             inc_stat!(STAT_RECV_RST);
             return (ROUTE_DROP, 0);
         }
-        if tcp_flags & FLAG_SYN != 0 {
+        // Catch stray ACKs and SYN-ACKs for dead connections
+        if tcp_flags & FLAG_ACK != 0 {
+            inc_stat!(STAT_UNEXPECTED);
+            let reply_seq = ack_num;
+            let reply_ack = seq_num.wrapping_add(payload_len).wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
+
+            inc_stat!(STAT_SENT_RST);
+            action_opt = Some((FLAG_RST | FLAG_ACK, reply_seq, reply_ack));
+        }
+        else if tcp_flags & FLAG_SYN != 0 {
             inc_stat!(STAT_RECV_SYN);
             let rcv_nxt = seq_num.wrapping_add(1);
             let initial_snd_nxt = 1000u32;

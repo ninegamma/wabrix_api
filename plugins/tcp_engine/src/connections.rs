@@ -23,17 +23,37 @@ pub(crate) enum TcpState {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct FlowKey(pub u32, pub u16, pub u32, pub u16);
 
+// The sentinel value replacing `None`
+pub const NULL_NODE: usize = usize::MAX;
 
-pub (crate) struct ConnectionNode {
-    key: FlowKey, // Needed so we can remove it from the BTreeMap on timeout
-    pub(crate) state: TcpState,
-    pub(crate) snd_nxt: u32,
-    pub(crate) rcv_nxt: u32,
-    last_active_tsc: u64,
+pub(crate) struct ConnectionNode {
+    // -----------------------------------------
+    // 8-BYTE ALIGNED FIELDS
+    // -----------------------------------------
+    pub(crate) last_active_tsc: u64, // 8 bytes
 
-    // Doubly Linked List links (Indices into the arena, not pointers!)
-    prev: Option<usize>,
-    next: Option<usize>,
+    // -----------------------------------------
+    // 4-BYTE ALIGNED FIELDS
+    // -----------------------------------------
+    // Assuming FlowKey is (usize, usize, u16, u16) = 12 bytes
+    pub(crate) key: FlowKey,         // 12 bytes
+    pub(crate) snd_nxt: u32,         // 4 bytes
+    pub(crate) rcv_nxt: u32,         // 4 bytes
+
+    // Replaced Option<usize> (8 bytes each) with usize (4 bytes each)
+    pub(crate) prev: usize,            // 4 bytes
+    pub(crate) next: usize,            // 4 bytes
+
+    // -----------------------------------------
+    // 1-BYTE ALIGNED FIELDS
+    // -----------------------------------------
+    pub(crate) state: TcpState,      // 1 byte
+
+    // -----------------------------------------
+    // RUST COMPILER INJECTS 3 BYTES OF PADDING HERE
+    // TO MAKE THE TOTAL STRUCT ALIGN TO 8 BYTES
+    // -----------------------------------------
+    // TOTAL: 40 Bytes
 }
 
 pub(crate) struct ConnectionPool {
@@ -41,11 +61,11 @@ pub(crate) struct ConnectionPool {
     arena: Vec<ConnectionNode>,
 
     // The active Doubly Linked List
-    head: Option<usize>, // Oldest connections (Timeouts)
-    tail: Option<usize>, // Newest / Recently Active connections
+    head: usize, // Oldest connections (Timeouts)
+    tail: usize, // Newest / Recently Active connections
 
     // A list of empty slots in the arena to reuse memory without allocating
-    free_head: Option<usize>,
+    free_head: usize,
 }
 
 impl ConnectionPool {
@@ -53,10 +73,17 @@ impl ConnectionPool {
         Self {
             map: BTreeMap::new(),
             arena: Vec::with_capacity(capacity),
-            head: None,
-            tail: None,
-            free_head: None,
+            head: NULL_NODE,
+            tail: NULL_NODE,
+            free_head: NULL_NODE,
         }
+    }
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.arena.clear(); // Keeps the 524,288 capacity, but sets length to 0
+        self.head = NULL_NODE;
+        self.tail = NULL_NODE;
+        self.free_head = NULL_NODE;
     }
 
     /// O(1) Unlink a node from its current position in the linked list
@@ -64,34 +91,61 @@ impl ConnectionPool {
         let prev = self.arena[index].prev;
         let next = self.arena[index].next;
 
-        if let Some(p) = prev { self.arena[p].next = next; } else { self.head = next; }
-        if let Some(n) = next { self.arena[n].prev = prev; } else { self.tail = prev; }
+        // 1. Update the previous node (or the head pointer)
+        if prev != NULL_NODE {
+            self.arena[prev as usize].next = next;
+        } else {
+            self.head = next;
+        }
 
-        self.arena[index].prev = None;
-        self.arena[index].next = None;
+        // 2. Update the next node (or the tail pointer)
+        if next != NULL_NODE {
+            self.arena[next as usize].prev = prev;
+        } else {
+            self.tail = prev;
+        }
+
+        // 3. Clear the links of the removed node
+        self.arena[index].prev = NULL_NODE;
+        self.arena[index].next = NULL_NODE;
     }
 
     /// O(1) Push a node to the tail of the linked list (Mark as newest)
     fn push_tail(&mut self, index: usize) {
         self.arena[index].prev = self.tail;
-        self.arena[index].next = None;
+        self.arena[index].next = NULL_NODE;
 
-        if let Some(t) = self.tail { self.arena[t].next = Some(index); }
-        self.tail = Some(index);
-        if self.head.is_none() { self.head = Some(index); }
+        if self.tail != NULL_NODE {
+            self.arena[self.tail].next = index;
+        }
+        self.tail = index;
+
+        if self.head == NULL_NODE {
+            self.head = index;
+        }
     }
 
     /// O(log N) Insert a brand new connection
     pub fn insert(&mut self, key: FlowKey, state: TcpState, snd_nxt: u32, rcv_nxt: u32, tsc: u64) {
-        let index = if let Some(free_idx) = self.free_head {
+        let index = if self.free_head != NULL_NODE {
+            let free_idx = self.free_head;
             // Reuse an empty slot
             self.free_head = self.arena[free_idx].next;
-            self.arena[free_idx] = ConnectionNode { key, state, snd_nxt, rcv_nxt, last_active_tsc: tsc, prev: None, next: None };
+            self.arena[free_idx] = ConnectionNode { key, state, snd_nxt, rcv_nxt, last_active_tsc: tsc, prev: NULL_NODE, next: NULL_NODE };
             free_idx
         } else {
+            // SAFETY VALVE: Prevent Wasm OOM by stopping vector reallocation
+            if self.arena.len() == self.arena.capacity() {
+                log::error!(
+                    "TCP Engine: Connection pool capacity ({}) exhausted! Dropping new connection: {:?}",
+                    self.arena.capacity(),
+                    key
+                );
+                return;
+            }
             // Allocate a new slot
             let new_idx = self.arena.len();
-            self.arena.push(ConnectionNode { key, state, snd_nxt, rcv_nxt, last_active_tsc: tsc, prev: None, next: None });
+            self.arena.push(ConnectionNode { key, state, snd_nxt, rcv_nxt, last_active_tsc: tsc, prev: NULL_NODE, next: NULL_NODE });
             new_idx
         };
 
@@ -127,7 +181,7 @@ impl ConnectionPool {
             self.unlink(index);
             // Push to free list so the memory can be reused
             self.arena[index].next = self.free_head;
-            self.free_head = Some(index);
+            self.free_head = index;
         }
     }
 
@@ -135,7 +189,8 @@ impl ConnectionPool {
     pub fn scavenge_timeouts(&mut self, current_tsc: u64, timeout_cycles: u64) -> Vec<FlowKey> {
         let mut timed_out_keys = Vec::new();
 
-        while let Some(oldest_idx) = self.head {
+        while self.head != NULL_NODE {
+            let oldest_idx = self.head;
             if current_tsc.saturating_sub(self.arena[oldest_idx].last_active_tsc) > timeout_cycles {
                 // It timed out! 
                 let key = self.arena[oldest_idx].key;
@@ -153,6 +208,11 @@ impl ConnectionPool {
 
                     self.unlink(oldest_idx);
                     self.push_tail(oldest_idx);
+                    /*
+                    if timed_out_keys.len() >= limit {
+                        break; // STOP collecting to prevent OOM
+                    }
+                     */
                 } else {
                     // Already closed/dead — free the slot directly.
                     self.remove(&key);
