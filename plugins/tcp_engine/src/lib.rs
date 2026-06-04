@@ -99,10 +99,77 @@ struct SynGenerator {
     syns_sent: u64,
     activated: bool,
 }
+const MAX_TIMEOUTS: usize = 131072;  // 128k timeouts
+
+// Add a dummy constructor to your FlowKey (if you don't have one)
+impl FlowKey {
+    pub const fn empty() -> Self {
+        Self(0, 0, 0, 0)
+    }
+}
+
+pub struct TimeoutStack {
+    // We dropped the Option! Array is now densely packed at 12 bytes per slot.
+    items: [FlowKey; MAX_TIMEOUTS],
+    len: usize,
+}
+
+impl TimeoutStack {
+    pub const fn new() -> Self {
+        Self {
+            // Fill the array with dummy data. We will overwrite it later.
+            items: [FlowKey::empty(); MAX_TIMEOUTS],
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, key: FlowKey) {
+        if self.len < MAX_TIMEOUTS {
+            self.items[self.len] = key; // Overwrite the dummy/old data
+            self.len += 1;
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<FlowKey> {
+        if self.len > 0 {
+            self.len -= 1;
+            // Return a copy of the valid key. The old data remains in the array
+            // as garbage, but the `len` pointer ensures we never read it again.
+            Some(self.items[self.len])
+        } else {
+            None
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl core::iter::Extend<FlowKey> for TimeoutStack {
+    /// Extends the stack with items from an iterator.
+    /// Safely drops any excess items if `MAX_TIMEOUTS` is reached.
+    fn extend<T: IntoIterator<Item = FlowKey>>(&mut self, iter: T) {
+        for key in iter {
+            if self.len < MAX_TIMEOUTS {
+                self.items[self.len] = key;
+                self.len += 1;
+            } else {
+                // The queue is full. Break early to ignore the remaining items
+                // and naturally apply backpressure to the scavenger.
+                break;
+            }
+        }
+    }
+}
 
 static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
-static TIMEOUT_QUEUE: WasmCell<Vec<FlowKey>> = WasmCell::new(Vec::new());
+static TIMEOUT_QUEUE: WasmCell<TimeoutStack> = WasmCell::new(TimeoutStack::new());
 static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
     last_tsc: 0,
     cycle_accumulator: 0,
@@ -193,7 +260,7 @@ fn init_state_machine() {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
     // but it will NEVER trigger a resize or memory.grow during execution.
     //*CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(524_288));
-    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(50_000));
+    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(500_000));
 }
 
 struct TcpEngine;
@@ -222,7 +289,7 @@ impl Guest for TcpEngine {
     }
 
     fn process_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> (Vec<u32>, Vec<u32>) {
-
+        log::trace!("process_batch: len= {}, partition_offset= {}", batch_bytes.len(), partition_offset);
         let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
         let local_config = CONFIG.borrow().clone().unwrap_or_default();
 
@@ -260,6 +327,7 @@ impl Guest for TcpEngine {
             let mut action = 0;
             let mut len = 64;
             if packet.is_a_tick() {
+                log::trace!("process_batch: tick");
                 let mut generated_reply = false;
 
                 // PRIORITY 1: Process Timeout Teardowns
@@ -269,6 +337,7 @@ impl Guest for TcpEngine {
                 };
 
                 if let Some(flow_key) = pending_timeout {
+                    log::trace!("process_batch: processing timeout for flow_key {:?}", flow_key);
                     let current_tsc = CURRENT_TSC.get();
                     let (snd_nxt, rcv_nxt, state, exists) = if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
                         (conn.snd_nxt, conn.rcv_nxt, conn.state, true)
@@ -309,6 +378,7 @@ impl Guest for TcpEngine {
                 }
                 // PRIORITY 2: Generate new SYNs
                 if !generated_reply {
+                    log::trace!("process_batch: generating new SYN");
                     let syn_rate = local_config.syn_rate.unwrap_or(0);
                     if syn_rate > 0 {
                         let mut gen = SYN_GEN.borrow_mut();
@@ -373,7 +443,7 @@ impl Guest for TcpEngine {
             actions.push(action);
             lengths.push(len);
         }
-
+        log::trace!("process_batch: Finished successfully with {}, {} actions", actions.len(), lengths.len());
         (actions, lengths)
     }
 
@@ -394,14 +464,16 @@ impl Guest for TcpEngine {
             let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128)/1000) as u64;
             let last_scan = LAST_TIMEOUT_SCAN.get();
 
-            // Run the table scan only once every 20ms to save CPU
-            if current_tsc.saturating_sub(last_scan) > (tsc_freq / 50) {
+            // Run the table scan only once every 10ms to save CPU
+            if current_tsc.saturating_sub(last_scan) > (tsc_freq / 100) {
+
                 LAST_TIMEOUT_SCAN.set(current_tsc);
                 let mut pool_guard = CONNECTIONS.borrow_mut();
                 let mut queue = TIMEOUT_QUEUE.borrow_mut();
 
                 if let Some(pool) = pool_guard.as_mut() {
                     let timeouts= pool.scavenge_timeouts(current_tsc, timeout_cycles);
+                    log::trace!("process_timers: timeouts.len= {}", timeouts.len());
                     queue.extend(timeouts);
                 }
             }
@@ -435,10 +507,11 @@ impl Guest for TcpEngine {
                     }
                 }
                 gen.cycle_accumulator %= tsc_freq as u128;
+
+                log::trace!("process_timers: syn_frames= {}, gen.syns_sent= {}, max_syns= {:?}", syn_frames, gen.syns_sent, config.syn_limit);
                 frames_to_request += syn_frames;
             }
         }
-
         frames_to_request
     }
 
@@ -553,7 +626,7 @@ fn flush_state(mode: u8) {
     // 5. Clear all telemetry counters
     *TCP_STATS.borrow_mut() = [0; STAT_COUNT];
 
-    log::info!("TCP Engine state flushed (mode: {})", mode);
+    log::trace!("TCP Engine state flushed (mode: {})", mode);
 }
 
 /// Extracts protocol data, runs the state machine, and formats replies
@@ -586,6 +659,7 @@ fn handle_tcp_packet(
     let src_port = tcp_hdr.src_port();
     let dst_port = tcp_hdr.dst_port();
     let flow_key = FlowKey(src_ip, src_port, dst_ip, dst_port);
+    log::trace!("handle_tcp_packet: processing packet with flow_key {:?}", flow_key);
 
     let tcp_flags = tcp_hdr.flags();
     let seq_num = tcp_hdr.seq_num();

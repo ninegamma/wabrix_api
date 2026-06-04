@@ -1,5 +1,3 @@
-// Put this above your WasmEngine implementation
-
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
