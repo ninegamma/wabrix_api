@@ -49,10 +49,8 @@ impl Guest for MyInspector {
 
             // Execute Routing Logic
             if is_v4 && dst_port.is_some() {
-                // action |= ROUTE_FAST_PATH;
-                // Safe to unwrap because of the if condition
                 action |= ROUTE_STANDARD;
-                let port = dst_port.unwrap();
+                let port = dst_port.unwrap_or(0);
                 let telemetry_bucket = if port <= 9 {
                     port as u32
                 } else {

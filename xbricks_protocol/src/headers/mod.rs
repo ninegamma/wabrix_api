@@ -67,6 +67,9 @@ pub enum HeaderPtr {
 impl HeaderPtr {
     #[inline]
     pub fn new<T: EndOffset>(ptr: *mut T) -> HeaderPtr {
+        // SAFETY: `ptr` must be a valid, properly aligned pointer to a `T` that lives at
+        // least as long as the returned `HeaderPtr`. Callers uphold this by passing pointers
+        // derived from live UMEM frame references during packet parsing.
         unsafe {
             match (*ptr).header_kind() {
                 HeaderKind::Null => HeaderPtr::Null,
@@ -81,10 +84,12 @@ impl HeaderPtr {
         }
     }
 
-    // Accessors create temporary borrows on demand (no persistent &mut stored)
+    // Accessors create temporary borrows on demand (no persistent &mut stored).
     #[inline]
     pub fn as_mac_mut(&mut self) -> Option<&mut MacHeader> {
         match self {
+            // SAFETY: `p` was stored by `new()` from a live `*mut MacHeader` into valid UMEM
+            // memory. `&mut self` prevents any aliased mutable borrow of the same slot.
             HeaderPtr::Mac(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
@@ -92,6 +97,8 @@ impl HeaderPtr {
     #[inline]
     pub fn as_mac(&self) -> Option<&MacHeader> {
         match self {
+            // SAFETY: Same pointer invariant as `as_mac_mut`; `&self` prevents concurrent
+            // mutable access.
             HeaderPtr::Mac(p) => Some(unsafe { &**p }),
             _ => None,
         }
@@ -100,6 +107,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_arpipv4_mut(&mut self) -> Option<&mut ArpIpv4Header> {
         match self {
+            // SAFETY: `p` is a valid `*mut ArpIpv4Header` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::ArpIpv4(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
@@ -107,6 +115,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_arpipv4(&self) -> Option<&ArpIpv4Header> {
         match self {
+            // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::ArpIpv4(p) => Some(unsafe { &**p }),
             _ => None,
         }
@@ -116,6 +125,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_ip_mut(&mut self) -> Option<&mut IpHeader> {
         match self {
+            // SAFETY: `p` is a valid `*mut IpHeader` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Ip(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
@@ -123,6 +133,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_ip(&self) -> Option<&IpHeader> {
         match self {
+            // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Ip(p) => Some(unsafe { &**p }),
             _ => None,
         }
@@ -132,6 +143,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_ipv6_mut(&mut self) -> Option<&mut Ipv6Header> {
         match self {
+            // SAFETY: `p` is a valid `*mut Ipv6Header` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Ipv6(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
@@ -139,6 +151,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_ipv6(&self) -> Option<&Ipv6Header> {
         match self {
+            // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Ipv6(p) => Some(unsafe { &**p }),
             _ => None,
         }
@@ -148,6 +161,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_tcp_mut(&mut self) -> Option<&mut TcpHeader> {
         match self {
+            // SAFETY: `p` is a valid `*mut TcpHeader` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Tcp(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
@@ -155,6 +169,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_tcp(&self) -> Option<&TcpHeader> {
         match self {
+            // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Tcp(p) => Some(unsafe { &**p }),
             _ => None,
         }
@@ -164,6 +179,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_udp_mut(&mut self) -> Option<&mut UdpHeader> {
         match self {
+            // SAFETY: `p` is a valid `*mut UdpHeader` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Udp(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
@@ -171,6 +187,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_udp(&self) -> Option<&UdpHeader> {
         match self {
+            // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Udp(p) => Some(unsafe { &**p }),
             _ => None,
         }
@@ -180,6 +197,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_icmp_mut(&mut self) -> Option<&mut IcmpHeader> {
         match self {
+            // SAFETY: `p` is a valid `*mut IcmpHeader` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Icmp(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
@@ -187,6 +205,7 @@ impl HeaderPtr {
     #[inline]
     pub fn as_icmp(&self) -> Option<&IcmpHeader> {
         match self {
+            // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Icmp(p) => Some(unsafe { &**p }),
             _ => None,
         }

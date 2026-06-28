@@ -149,6 +149,10 @@ pub fn flow_hash(flow: &FiveTupleV4) -> usize {
 
 fn flow_as_u8(flow: &FiveTupleV4) -> &[u8] {
     let size = mem::size_of::<FiveTupleV4>();
+    // SAFETY: `flow` is a valid shared reference, so its address is non-null and properly
+    // aligned. `FiveTupleV4` is a `#[repr(C)]` struct; casting to `*const u8` and reading
+    // `size_of::<FiveTupleV4>()` bytes is sound because all bit patterns are valid for bytes.
+    // The returned slice's lifetime is tied to `flow`, preventing use-after-free.
     unsafe { slice::from_raw_parts(flow as *const FiveTupleV4 as *const u8, size) }
 }
 

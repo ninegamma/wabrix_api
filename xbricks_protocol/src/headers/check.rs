@@ -64,7 +64,10 @@ fn sum_be_words(data: &[u8], skipword: usize) -> u32 {
 
 #[inline]
 fn sum_be_words_ptr(data: *mut u8, len: usize, skipword: usize) -> u32 {
-    // Create a temporary u8 slice (u8 has alignment 1, so this is always valid)
+    // SAFETY: `data` is a `*mut u8` pointer provided by the caller with `len` valid bytes.
+    // Casting to `*const u8` does not change alignment requirements (u8 has alignment 1).
+    // The slice does not outlive the caller's borrow, and `len` is caller-guaranteed to be
+    // within the allocation.
     let bytes: &[u8] = unsafe { slice::from_raw_parts(data as *const u8, len) };
     // Reuse the safe implementation above
     sum_be_words(bytes, skipword)

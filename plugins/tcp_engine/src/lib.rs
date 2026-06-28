@@ -32,6 +32,9 @@ wit_bindgen::generate!({
 /// A zero-cost, single-threaded state container for WASM.
 /// Uses `RefCell` to prevent re-entrancy panics, but uses NO ATOMICS.
 pub struct WasmCell<T>(RefCell<T>);
+// SAFETY: WASM is single-threaded by specification; there is no concurrent access to these
+// statics. `Sync` is needed to place `WasmCell` in a `static`, but no thread can ever
+// observe a data race in this environment.
 unsafe impl<T> Sync for WasmCell<T> {}
 
 impl<T> WasmCell<T> {
@@ -49,6 +52,8 @@ impl<T> WasmCell<T> {
 /// An even faster container for simple Copy types (like u64).
 /// Uses `Cell`, which doesn't even have a borrow counter. Absolute zero overhead.
 pub struct WasmValue<T>(Cell<T>);
+// SAFETY: Same as `WasmCell` — WASM is single-threaded, so `Sync` cannot be violated.
+// `Cell<T>` itself is not `Sync`, but no concurrent access is possible in this runtime.
 unsafe impl<T> Sync for WasmValue<T> {}
 
 impl<T> WasmValue<T> {
@@ -259,13 +264,23 @@ pub fn init_logging() {
 fn init_state_machine() {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
     // but it will NEVER trigger a resize or memory.grow during execution.
-    //*CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(524_288));
-    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(500_000));
+    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(524_288));
 }
 
 struct TcpEngine;
 
 impl Guest for TcpEngine {
+    // init_data is called once per plugin instance, and is responsible for initializing the state of the plugin.
+    // It is called before any other function in the plugin.
+    // The init_data function is called with the following arguments:
+    // - data: A vector of key-value pairs, where each pair is a (key, value) tuple.
+    //   the key value pairs are set in the .toml file for a node of type WasmEngine in the section "wasm_data"
+    // - tsc_frequency: The frequency of the TSC counter, in Hz.
+    // The init_data function should initialize the plugin's state, such as the connection pool
+    // or any other state that needs to be maintained across batches.
+    // The init_data function should also set the tsc_frequency value in the EngineConfig struct.
+    // The init_data function should return a boolean value indicating whether the initialization was successful.
+    // If the initialization is successful, the plugin will be ready to process batches.
     fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency:u64) {
         init_logging();
         let mut config = EngineConfig::default();
@@ -321,7 +336,15 @@ impl Guest for TcpEngine {
 
         // Lock Global States ONCE per batch
         let mut connections_guard = CONNECTIONS.borrow_mut();
-        let pool = connections_guard.as_mut().expect("Table uninitialized");
+        let Some(pool) = connections_guard.as_mut() else {
+            log::error!("process_batch: connection table uninitialized — dropping all packets");
+            let n = batch.len();
+            let mut drop_actions = Vec::with_capacity(n);
+            let mut drop_lengths = Vec::with_capacity(n);
+            drop_actions.resize(n, ROUTE_DROP);
+            drop_lengths.resize(n, 0u32);
+            return (drop_actions, drop_lengths);
+        };
 
         for mut packet in batch.iter_mut() {
             let mut action = 0;
@@ -909,6 +932,10 @@ fn write_tcp_reply(
     let ip_size = core::mem::size_of::<IpHeader>();
     let tcp_size = core::mem::size_of::<TcpHeader>();
 
+    // SAFETY: `data_ptr` comes from `packet.data_ptr_mut()`, which returns a valid pointer into
+    // the WASM linear memory frame. The combined header size (54 bytes) is well below the
+    // minimum WASM frame size. `mac`, `ip`, and `tcp` are local stack variables; source and
+    // destination regions do not overlap. All three types are `Copy` + `#[repr(C)]`.
     unsafe {
         ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
         ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size) as *mut IpHeader, 1);

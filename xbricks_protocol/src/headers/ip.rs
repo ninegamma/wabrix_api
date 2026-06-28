@@ -68,6 +68,10 @@ impl IpHeader {
         let src_ip = self.src();
         let dst_ip = self.dst();
         if (protocol == 6 || protocol == 17) && self.payload_size(0) >= 4 {
+            // SAFETY: `self` is a valid `&IpHeader` reference. `self.offset()` returns the
+            // IP header length in bytes (validated by `payload_size(0) >= 4` above), so
+            // `port_as_u8` points into the L4 payload region which is at least 4 bytes long.
+            // Reading 2+2 bytes for src/dst port via `from_raw_parts` is within bounds.
             unsafe {
                 let self_as_u8 = (self as *const IpHeader) as *const u8;
                 let port_as_u8 = self_as_u8.offset(self.offset() as isize);
@@ -257,6 +261,9 @@ impl IpHeader {
 
     #[inline]
     pub fn update_checksum(&mut self) {
+        // SAFETY: `self` is a valid `&mut IpHeader` reference. Casting to `*const u8` and
+        // reading `size_of::<IpHeader>()` bytes is sound because all bit patterns are valid
+        // for a byte slice view. The slice does not outlive `self`.
         unsafe {
             let bytes = slice::from_raw_parts((self as *const IpHeader) as *const u8, size_of::<IpHeader>());
             self.set_csum(checksum(bytes, 5));

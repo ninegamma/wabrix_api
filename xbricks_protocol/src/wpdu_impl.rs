@@ -156,10 +156,15 @@ impl WPdu {
         if self.desc_len < 14 {
             return false;
         }
-        let ethertype = u16::from_be_bytes([
-            unsafe { *self.data_ptr(umem_addr).add(12) },
-            unsafe { *self.data_ptr(umem_addr).add(13) }
-        ]);
+        // SAFETY: The `desc_len < 14` guard above ensures at least 14 bytes are accessible.
+        // `data_ptr` returns a pointer into valid WASM linear memory; offsets 12 and 13 are
+        // within the checked bounds and do not alias any live reference.
+        let ethertype = unsafe {
+            u16::from_be_bytes([
+                *self.data_ptr(umem_addr).add(12),
+                *self.data_ptr(umem_addr).add(13),
+            ])
+        };
         // check for "Local Experimental EtherType (0x88B5)"
         ethertype == 0x88B5
     }
@@ -183,6 +188,11 @@ impl WPdu {
 
     #[inline]
     pub fn replace_header(&mut self, umem_addr: usize, which: usize, hdr: &Header) {
+        // SAFETY: `pdu_header` is reconstructed from `HeaderStack` offsets that were set during
+        // parsing from valid frame data. `assert_eq!` enforces type consistency so each
+        // `copy_nonoverlapping` copies exactly one element of the correct type. `hdr` is a
+        // caller-supplied reference; because it points to a local or caller-owned value, it
+        // cannot alias the destination inside the UMEM frame.
         unsafe {
             // HeaderStack calculates headers on the fly. We get a view (pointer wrapper).
             let mut pdu_header = self.header_stack.get(self.base_addr(umem_addr), which);
@@ -217,6 +227,10 @@ impl WPdu {
         // Get pointer to the start of the buffer
         let hdr_ptr = self.data_address(umem_addr, 0) as *mut MacHeader;
 
+        // SAFETY: `data_len() >= MacHeader::size()` was verified above, so `hdr_ptr` points
+        // to at least `size_of::<MacHeader>()` valid bytes within the UMEM frame.
+        // `&mut *hdr_ptr` and `&*hdr_ptr` are never used simultaneously: `mac` is a shared
+        // borrow used only for dispatch, and the mutable reference is consumed by `push()`.
         unsafe {
             self.header_stack.push(self.base_addr(umem_addr), Header::Mac(&mut *hdr_ptr));
             let mac = &*hdr_ptr;
@@ -264,6 +278,8 @@ impl WPdu {
         self.header_stack.hc = 1;
 
         let mac_ptr = self.data_address(umem_addr, 0) as *const MacHeader;
+        // SAFETY: `l >= MAC_HDR_SIZE` was checked above, so the MAC header bytes are accessible.
+        // `mac_ptr` is derived from `data_address` which adds `umem_base + desc_addr`.
         let etype = unsafe { (*mac_ptr).etype() };
 
         match etype {
@@ -277,8 +293,11 @@ impl WPdu {
                 self.header_stack.offsets[1] = hr + 14;
 
                 let ip_ptr = self.data_address(umem_addr, 14) as *const IpHeader;
-                let l4_proto = unsafe { (*ip_ptr).protocol() };
-                let ip_len = unsafe { (*ip_ptr).offset() as u16 };
+                // SAFETY: `l >= 14 + 20` was checked above; both reads are within the
+                // fully-accessible IPv4 header at `ip_ptr`.
+                let (l4_proto, ip_len) = unsafe {
+                    ((*ip_ptr).protocol(), (*ip_ptr).offset() as u16)
+                };
 
                 let l4_offset = 14 + ip_len;
 
@@ -339,6 +358,8 @@ impl WPdu {
                 self.header_stack.offsets[1] = hr + 14;
 
                 let ipv6_ptr = self.data_address(umem_addr, 14) as *const Ipv6Header;
+                // SAFETY: `l >= 14 + 40` was checked above; the IPv6 fixed header (40 bytes) is
+                // fully accessible at offset 14.
                 let next_header = unsafe { (*ipv6_ptr).next_header() };
 
                 let l4_offset = 14 + 40; // IPv6 header is always 40 bytes (no options in base header)
@@ -408,6 +429,9 @@ impl WPdu {
     #[inline]
     fn parse_ipv4(&mut self, umem_addr: usize, offset: usize) {
         let hdr_ptr = self.data_address(umem_addr, offset) as *mut IpHeader;
+        // SAFETY: The caller (`parse`) checks `l >= mac.offset() + IpHeader::size()` before
+        // calling this function, so `hdr_ptr` points to at least `size_of::<IpHeader>()` valid
+        // bytes. The mutable reference is used only within this block and is not aliased.
         unsafe {
             let ip = &mut *hdr_ptr;
             self.header_stack.push(self.base_addr(umem_addr), Header::Ip(ip));
@@ -425,6 +449,8 @@ impl WPdu {
     #[inline]
     fn parse_tcp(&mut self, umem_addr: usize, offset: usize) {
         let hdr = self.data_address(umem_addr, offset) as *mut TcpHeader;
+        // SAFETY: All callers check that `data_len >= offset + TcpHeader::size()` before
+        // calling, so `hdr` points to at least `size_of::<TcpHeader>()` valid bytes.
         unsafe {
             self.header_stack.push(self.base_addr(umem_addr), Header::Tcp(&mut *hdr));
         }
@@ -433,6 +459,8 @@ impl WPdu {
     #[inline]
     fn parse_udp(&mut self, umem_addr: usize, offset: usize) {
         let hdr = self.data_address(umem_addr, offset) as *mut UdpHeader;
+        // SAFETY: All callers check that `data_len >= offset + UdpHeader::size()` before
+        // calling, so `hdr` points to at least `size_of::<UdpHeader>()` valid bytes.
         unsafe {
             self.header_stack.push(self.base_addr(umem_addr), Header::Udp(&mut *hdr));
         }
@@ -441,6 +469,8 @@ impl WPdu {
     #[inline]
     fn parse_icmp(&mut self, umem_addr: usize, offset: usize) {
         let hdr = self.data_address(umem_addr, offset) as *mut IcmpHeader;
+        // SAFETY: All callers check that `data_len >= offset + IcmpHeader::size()` before
+        // calling, so `hdr` points to at least `size_of::<IcmpHeader>()` valid bytes.
         unsafe {
             self.header_stack.push(self.base_addr(umem_addr), Header::Icmp(&mut *hdr));
         }
@@ -451,6 +481,9 @@ impl WPdu {
         //TODO generalize for any protocol type, not only Ipv4
         let hdr = self.data_address(umem_addr, offset) as *mut ArpIpv4Header;
 
+        // SAFETY: The caller checks `l >= mac.offset() + ArpIpv4Header::size()` before
+        // calling, so `hdr` points to at least `size_of::<ArpIpv4Header>()` valid bytes.
+        // The hw_type/proto_etype check validates the ARP packet before pushing.
         unsafe {
             let arp = &mut *hdr;
             if arp.hw_type() == 1 && arp.proto_etype() == 0x0800 {
@@ -462,10 +495,13 @@ impl WPdu {
     #[inline]
     fn parse_ipv6(&mut self, umem_addr: usize, offset: usize) {
         let hdr = self.data_address(umem_addr, offset) as *mut Ipv6Header;
+        // SAFETY: The caller checks `l >= offset + Ipv6Header::size()` before calling, so
+        // `hdr` points to at least `size_of::<Ipv6Header>()` (40) valid bytes.
         unsafe {
             self.header_stack.push(self.base_addr(umem_addr), Header::Ipv6(&mut *hdr));
         }
         let next_header;
+        // SAFETY: Same bounds as above; reading `next_header` from an already-validated pointer.
         unsafe {
             let ipv6 = &mut *hdr;
             next_header = ipv6.next_header();
@@ -521,8 +557,12 @@ impl WPdu {
         // 3. Calculate New Absolute Address
         let new_desc_addr = self.desc_addr - header_size as u64;
 
+        // SAFETY: The headroom check above (`desc_addr >= local_frame_base + header_size`) proves
+        // there are at least `header_size` writable bytes before the current data start within
+        // the frame. `header` is a valid `&T` reference on the caller's stack; casting to
+        // `*const u8` and copying `size_of::<T>()` bytes is sound for any `Copy + Sized` type.
+        // Source (stack) and destination (UMEM frame) do not overlap.
         unsafe {
-            // Because new_desc_addr is the absolute UMEM offset, just add it!
             let dst_addr = umem_addr + new_desc_addr as usize;
             ptr::copy_nonoverlapping(header as *const T as *const u8, dst_addr as *mut u8, header_size);
         }
@@ -643,6 +683,10 @@ impl Pdu0 {
     #[inline]
     pub fn slice_from_bytes(bytes: &mut [u8]) -> &mut [Self] {
         let count = bytes.len() / core::mem::size_of::<Self>();
+        // SAFETY: `bytes` is an exclusively-held `&mut [u8]`, so the pointer is valid and
+        // uniquely owned. `count` is rounded down to whole `Pdu0` structs, so we never read
+        // past the slice end. `Pdu0` is `#[repr(C, align(64))]`; the caller must ensure the
+        // buffer is 64-byte aligned (guaranteed by the host WASM ABI).
         unsafe {
             core::slice::from_raw_parts_mut(
                 bytes.as_mut_ptr() as *mut Self,
@@ -653,11 +697,19 @@ impl Pdu0 {
 
     /// Returns a mutable slice to the packet data.
     /// `offset` is the partition_offset provided by the Host.
+    ///
+    /// # Safety
+    /// The caller must ensure `offset` is the exact `partition_offset` received from the host
+    /// ABI (i.e., `umem_base = 0u32.wrapping_sub(offset)`). The resulting slice covers the
+    /// full frame (`frame_size()` bytes) starting at `desc_addr`; the caller must not create
+    /// overlapping mutable slices into the same frame.
     #[inline(always)]
     pub unsafe fn data_mut(&mut self, offset: u32) -> &mut [u8] {
         let umem_addr = (0u32).wrapping_sub(offset) as usize;
         let ptr = self.w.data_ptr(umem_addr);
-        // Assuming a standard MTU or max buffer size, e.g., 2048
+        // SAFETY: `ptr` is `umem_base + desc_addr` — a valid address within the WASM linear
+        // memory region for this frame. `frame_size()` is the pre-allocated frame capacity;
+        // the contract from `data_mut`'s caller guarantees no aliasing mutable reference.
         core::slice::from_raw_parts_mut(ptr, self.frame_size())
     }
 
@@ -672,19 +724,24 @@ impl Pdu0 {
         tcp: &TcpHeader,
         partition_offset: u32,
     ) -> u32 {
+        // SAFETY: `partition_offset` comes directly from the host ABI; `data_mut` is called
+        // once and its result is used exclusively within this function — no other reference
+        // to the same frame is live concurrently.
         let data = unsafe { self.data_mut(partition_offset) };
 
         let mac_len = core::mem::size_of::<MacHeader>();
         let ip_len = core::mem::size_of::<IpHeader>();
         let tcp_len = core::mem::size_of::<TcpHeader>();
 
+        // SAFETY: `mac`, `ip`, and `tcp` are valid references to `#[repr(C)]` Copy types on
+        // the caller's stack. Casting to `*const u8` and reading `size_of::<T>()` bytes is
+        // sound because all bit patterns are valid for byte slices. Source (stack) and
+        // destination (WASM linear memory) do not overlap.
         unsafe {
-            // Treat the structs as raw byte slices
             let mac_bytes = core::slice::from_raw_parts(mac as *const _ as *const u8, mac_len);
             let ip_bytes = core::slice::from_raw_parts(ip as *const _ as *const u8, ip_len);
             let tcp_bytes = core::slice::from_raw_parts(tcp as *const _ as *const u8, tcp_len);
 
-            // Copy them sequentially into the packet buffer
             data[0..mac_len].copy_from_slice(mac_bytes);
             data[mac_len..mac_len + ip_len].copy_from_slice(ip_bytes);
             data[mac_len + ip_len..mac_len + ip_len + tcp_len].copy_from_slice(tcp_bytes);

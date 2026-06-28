@@ -88,6 +88,10 @@ impl HeaderStack {
     pub fn tcp_mut(&mut self, base_addr: usize, which: usize) -> &mut TcpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: `addr` is `base_addr + offsets[which]`. `offsets[which]` was written by
+        // `push()` from a live `&mut TcpHeader` into the same UMEM frame, so the address is
+        // valid for at least `size_of::<TcpHeader>()` bytes. `&mut self` guarantees exclusive
+        // access, preventing aliased mutable references to the same slot.
         unsafe { &mut *(addr as *mut TcpHeader) }
     }
 
@@ -95,6 +99,8 @@ impl HeaderStack {
     pub fn ip_mut(&mut self, base_addr: usize, which: usize) -> &mut IpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp_mut`; offset was stored from a valid `&mut IpHeader`
+        // in the same UMEM frame, and `&mut self` prevents aliased mutable borrows.
         unsafe { &mut *(addr as *mut IpHeader) }
     }
 
@@ -102,6 +108,8 @@ impl HeaderStack {
     pub fn mac_mut(&mut self, base_addr: usize, which: usize) -> &mut MacHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp_mut`; offset was stored from a valid `&mut MacHeader`
+        // in the same UMEM frame, and `&mut self` prevents aliased mutable borrows.
         unsafe { &mut *(addr as *mut MacHeader) }
     }
 
@@ -109,6 +117,8 @@ impl HeaderStack {
     pub fn arp_mut(&mut self, base_addr: usize, which: usize) -> &mut ArpIpv4Header {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp_mut`; offset was stored from a valid `&mut ArpIpv4Header`
+        // in the same UMEM frame, and `&mut self` prevents aliased mutable borrows.
         unsafe { &mut *(addr as *mut ArpIpv4Header) }
     }
 
@@ -116,6 +126,8 @@ impl HeaderStack {
     pub fn ipv6_mut(&mut self, base_addr: usize, which: usize) -> &mut Ipv6Header {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp_mut`; offset was stored from a valid `&mut Ipv6Header`
+        // in the same UMEM frame, and `&mut self` prevents aliased mutable borrows.
         unsafe { &mut *(addr as *mut Ipv6Header) }
     }
 
@@ -123,6 +135,8 @@ impl HeaderStack {
     pub fn udp_mut(&mut self, base_addr: usize, which: usize) -> &mut UdpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp_mut`; offset was stored from a valid `&mut UdpHeader`
+        // in the same UMEM frame, and `&mut self` prevents aliased mutable borrows.
         unsafe { &mut *(addr as *mut UdpHeader) }
     }
 
@@ -130,6 +144,8 @@ impl HeaderStack {
     pub fn icmp_mut(&mut self, base_addr: usize, which: usize) -> &mut IcmpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp_mut`; offset was stored from a valid `&mut IcmpHeader`
+        // in the same UMEM frame, and `&mut self` prevents aliased mutable borrows.
         unsafe { &mut *(addr as *mut IcmpHeader) }
     }
 
@@ -137,6 +153,10 @@ impl HeaderStack {
     pub fn tcp(&self, base_addr: usize, which: usize) -> &TcpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: `addr` is `base_addr + offsets[which]`. `offsets[which]` was written by
+        // `push()` from a live reference into the UMEM frame, so the address is valid for
+        // `size_of::<TcpHeader>()` bytes. `&self` allows shared borrows; no mutable alias
+        // to this slot exists while `&self` is held.
         unsafe { &*(addr as *const TcpHeader) }
     }
 
@@ -144,6 +164,8 @@ impl HeaderStack {
     pub fn ip(&self, base_addr: usize, which: usize) -> &IpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp`; offset was stored from a valid `&IpHeader` reference,
+        // and `&self` prevents concurrent mutable access.
         unsafe { &*(addr as *const IpHeader) }
     }
 
@@ -151,6 +173,8 @@ impl HeaderStack {
     pub fn mac(&self, base_addr: usize, which: usize) -> &MacHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp`; offset was stored from a valid `&MacHeader` reference,
+        // and `&self` prevents concurrent mutable access.
         unsafe { &*(addr as *const MacHeader) }
     }
 
@@ -158,6 +182,8 @@ impl HeaderStack {
     pub fn arp(&self, base_addr: usize, which: usize) -> &ArpIpv4Header {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp`; offset was stored from a valid `&ArpIpv4Header` reference,
+        // and `&self` prevents concurrent mutable access.
         unsafe { &*(addr as *const ArpIpv4Header) }
     }
 
@@ -165,6 +191,8 @@ impl HeaderStack {
     pub fn ipv6(&self, base_addr: usize, which: usize) -> &Ipv6Header {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp`; offset was stored from a valid `&Ipv6Header` reference,
+        // and `&self` prevents concurrent mutable access.
         unsafe { &*(addr as *const Ipv6Header) }
     }
 
@@ -172,6 +200,8 @@ impl HeaderStack {
     pub fn udp(&self, base_addr: usize, which: usize) -> &UdpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp`; offset was stored from a valid `&UdpHeader` reference,
+        // and `&self` prevents concurrent mutable access.
         unsafe { &*(addr as *const UdpHeader) }
     }
 
@@ -179,6 +209,8 @@ impl HeaderStack {
     pub fn icmp(&self, base_addr: usize, which: usize) -> &IcmpHeader {
         debug_assert!(which < self.hc as usize, "Attempted to access uninitialized header!");
         let addr = base_addr + self.offsets[which] as usize;
+        // SAFETY: Same invariant as `tcp`; offset was stored from a valid `&IcmpHeader` reference,
+        // and `&self` prevents concurrent mutable access.
         unsafe { &*(addr as *const IcmpHeader) }
     }
 }

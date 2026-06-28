@@ -33,6 +33,10 @@ impl<'a> Packet<'a> {
 
     #[inline]
     pub fn data(&self) -> &[u8] {
+        // SAFETY: `data_ptr` returns `umem_base + desc_addr`, a pointer into the WASM linear
+        // memory region backing this packet. `data_len()` is the byte count set by the host
+        // and is guaranteed to fit within the frame. The slice lifetime is tied to `&self`,
+        // so no mutable alias to the same region can exist concurrently.
         unsafe {
             core::slice::from_raw_parts(
                 self.pdu.data_ptr(self.umem_base),
@@ -301,8 +305,16 @@ impl<'a> Packet<'a> {
         let tcp_len = core::mem::size_of::<TcpHeader>();
 
         let ptr = self.pdu.data_ptr(self.umem_base);
+        // SAFETY: `ptr` points to the start of the frame's data region in WASM linear memory.
+        // `frame_size()` is the pre-allocated frame capacity (a power-of-2 byte count) and is
+        // always larger than the combined header sizes written below. `&mut self` ensures no
+        // other reference to this frame exists concurrently.
         let data = unsafe { core::slice::from_raw_parts_mut(ptr, self.pdu.frame_size()) };
 
+        // SAFETY: `mac`, `ip`, and `tcp` are valid references to `#[repr(C)]` Copy types on
+        // the caller's stack. Casting them to `*const u8` and reading `size_of::<T>()` bytes
+        // is sound because all bit patterns are valid for byte slices. The source and destination
+        // slices do not overlap (stack locals vs. WASM linear memory).
         unsafe {
             let mac_bytes = core::slice::from_raw_parts(mac as *const _ as *const u8, mac_len);
             let ip_bytes  = core::slice::from_raw_parts(ip  as *const _ as *const u8, ip_len);
@@ -330,6 +342,11 @@ impl<'a> PacketBatch<'a> {
     /// Hides the pointer casting and 2's complement math from the user.
     #[inline(always)]
     pub fn new(batch_bytes: &'a mut [u8], partition_offset: u32) -> Self {
+        // SAFETY: `batch_bytes` is a `&mut [u8]` owned by the caller for lifetime `'a`, so the
+        // pointer is valid and exclusively held. The host ABI guarantees the buffer contains a
+        // contiguous array of packed `Pdu0` structs. `Pdu0` is `#[repr(C, align(64))]`; the
+        // count is rounded down to whole structs, so we never read past the slice end. The
+        // caller must ensure the buffer is 64-byte aligned (guaranteed by the WASM host ABI).
         let pdus = unsafe {
             slice::from_raw_parts_mut(
                 batch_bytes.as_mut_ptr() as *mut Pdu0,
