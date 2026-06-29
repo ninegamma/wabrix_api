@@ -261,10 +261,13 @@ pub fn init_logging() {
     log::set_max_level(log::LevelFilter::Info); // Set your desired Wasm log level
 }
 
+
+const MAX_CONNECTIONS: usize = 524_288;
+
 fn init_state_machine() {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
     // but it will NEVER trigger a resize or memory.grow during execution.
-    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(524_288));
+    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new());
 }
 
 struct TcpEngine;
@@ -583,7 +586,12 @@ impl Guest for TcpEngine {
     }
 
     fn get_telemetry() -> Vec<u64> {
-        TCP_STATS.borrow().to_vec()
+        let mut stats= TCP_STATS.borrow().to_vec();
+        // Add current pool usage to stats
+        if let Some(pool) = CONNECTIONS.borrow().as_ref() {
+            stats.push(pool.watermark as u64); // Current active/reused nodes
+        }
+        stats
     }
 }
 
@@ -838,19 +846,43 @@ fn run_tcp_state_machine(
                 return reply!(FLAG_ACK);
             }
         }
-        TcpState::FinWait1 => {
-            if tcp_flags & FLAG_FIN != 0 && tcp_flags & FLAG_ACK != 0 {
-                conn.state = TcpState::Closed;
-                conn.rcv_nxt = seq_num.wrapping_add(1);
+        TcpState::Established => {
+            if tcp_flags & FLAG_FIN != 0 {
+                // Passive Close
+                conn.state = TcpState::LastAck;
+
+                // Only advance rcv_nxt if the FIN is actually in sequence
+                if seq_num == conn.rcv_nxt {
+                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
+                }
+
+                let send_seq = conn.snd_nxt;
+                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+
+                inc_stat!(STAT_SENT_FIN_PSSV);
                 inc_stat!(STAT_SENT_ACK4FIN);
-                return reply!(FLAG_ACK);
-            } else if tcp_flags & FLAG_FIN != 0 {
-                conn.state = TcpState::Closing;
-                conn.rcv_nxt = seq_num.wrapping_add(1);
-                inc_stat!(STAT_SENT_ACK4FIN);
-                return reply!(FLAG_ACK);
+                return Some((FLAG_FIN | FLAG_ACK, send_seq, conn.rcv_nxt));
             } else if tcp_flags & FLAG_ACK != 0 {
-                conn.state = TcpState::FinWait2;
+                if payload_len > 0 {
+                    if seq_num == conn.rcv_nxt {
+                        // In-order data: advance the receive window
+                        conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
+                        inc_stat!(STAT_SENT_ACK);
+                        return reply!(FLAG_ACK);
+                    } else {
+                        // Out-of-order or Retransmission: Send duplicate ACK (Fast Retransmit trigger)
+                        inc_stat!(STAT_SENT_ACK);
+                        return reply!(FLAG_ACK);
+                    }
+                } else {
+                    // payload_len == 0 (Pure ACK)
+                    // Check if it's a Keepalive (seq_num is exactly 1 byte before rcv_nxt)
+                    if seq_num == conn.rcv_nxt.wrapping_sub(1) {
+                        inc_stat!(STAT_SENT_ACK);
+                        return reply!(FLAG_ACK); // Echo the ACK to keep the connection alive
+                    }
+                    // Otherwise, it's just a duplicate ACK. Drop it to save TX bandwidth.
+                }
             }
         }
         TcpState::FinWait2 => {
