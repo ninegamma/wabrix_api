@@ -3,12 +3,16 @@ extern crate alloc;
 pub mod headers;
 pub mod helpers;
 pub mod packet;
+pub mod mailbox_api;
 // Declare the implementation file, but keep it hidden from the outside world.
 mod wpdu_impl;
 // Declare the routing module as public.
 // (It will decide internally what to actually export).
 pub mod exports;
 mod hstack;
+
+/// The maximum number of packets in a single batch.
+pub const MAX_BATCH_SIZE: usize = 512;
 
 pub const TELEMETRY_FLAG: u32  = 1 << 8; // Bit 8
 
@@ -83,4 +87,18 @@ impl From<PluginOpcode> for u32 {
             PluginOpcode::UnknownReserved(val) => val,
         }
     }
+}
+
+/// Shared zero-copy mailbox between host and plugin.
+/// Layout MUST match `xbricks_base::mailbox::BatchMetadata` on the host exactly.
+#[repr(C)]
+pub struct BatchMetadata {
+    /// Written by host before calling process-batch: AF_XDP frame descriptor offsets (UMEM-relative)
+    pub desc_addrs:  [u32; MAX_BATCH_SIZE],
+    /// Written by host before calling process-batch: original packet lengths in bytes
+    pub lengths:     [u32; MAX_BATCH_SIZE],
+    /// Written by plugin during process-batch: routing decisions (route_id)
+    pub actions:     [u32; MAX_BATCH_SIZE],
+    /// Written by plugin during process-batch: new packet length (0 = unchanged)
+    pub new_lengths: [u32; MAX_BATCH_SIZE],
 }

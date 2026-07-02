@@ -2,9 +2,9 @@
 use core::slice;
 use crate::hstack::HeaderStack;
 use crate::headers::{ArpIpv4Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader};
-use crate::exports::{Pdu0};
+use crate::exports::Pdu0;
 
-/// The safe, high-level interface
+/// The safe, high-level interface for a single packet.
 pub struct Packet<'a> {
     pdu: &'a mut Pdu0,
     umem_base: usize,
@@ -18,7 +18,7 @@ impl<'a> Packet<'a> {
         ((HeaderKind::Tcp as u32) << 8);
 
 
-    /// Internal constructor used by your host engine, NOT the third party.
+    /// Internal constructor.
     #[inline(always)]
     pub fn new(pdu: &'a mut Pdu0, umem_base: usize) -> Self {
         Self { pdu, umem_base }
@@ -391,3 +391,4 @@ impl<'a> Iterator for PacketBatchIter<'a> {
         self.iter.next().map(|pdu| Packet::new(pdu, self.umem_base))
     }
 }
+

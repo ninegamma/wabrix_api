@@ -4,17 +4,18 @@ pub mod connections;
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::{ptr, slice};
+use core::ptr;
 use core::cell::{Cell, RefCell};
 
 use network_types::eth::EtherType;
 use macaddr::MacAddr6;
 
-use xbricks_protocol::headers::{HeaderKind, IpHeader, MacHeader, TcpHeader};
+use xbricks_protocol::headers::{IpHeader, MacHeader, TcpHeader};
 //use xbricks_protocol::hstack::HeaderStack;
 use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
 use xbricks_protocol::{PluginOpcode, StandardOpcode};
-use xbricks_protocol::packet::{Packet, PacketBatch};
+use xbricks_protocol::mailbox_api::MailboxBatch;
+use xbricks_protocol::packet::Packet;
 use crate::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::xbricks::plugins::packet_engine::Guest;
 use crate::xbricks::plugins::logging;
@@ -267,8 +268,9 @@ const MAX_CONNECTIONS: usize = 524_288;
 fn init_state_machine() {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
     // but it will NEVER trigger a resize or memory.grow during execution.
-    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new());
+    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(MAX_CONNECTIONS));
 }
+
 
 struct TcpEngine;
 
@@ -306,19 +308,15 @@ impl Guest for TcpEngine {
         *CONFIG.borrow_mut() = Some(config);
     }
 
-    fn process_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> (Vec<u32>, Vec<u32>) {
-        log::trace!("process_batch: len= {}, partition_offset= {}", batch_bytes.len(), partition_offset);
-        let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
+    fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
+        log::trace!("process_batch: batch_size={}, partition_offset={}", batch_size, partition_offset);
+        let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
         let local_config = CONFIG.borrow().clone().unwrap_or_default();
+        let mut processed_count = 0;
 
-        // =======================================================
         // Fast-Path Bypass
-        // =======================================================
         if local_config.bypass {
-            let mut actions = Vec::with_capacity(batch.len());
-            let mut lengths = Vec::with_capacity(batch.len());
             for mut packet in batch.iter_mut() {
-                // 2. Wrap PDU to cleanly check for ticks
                 let action = if packet.is_a_tick() {
                     inc_stat!(STAT_DROP);
                     inc_stat!(STAT_TICK_DROP);
@@ -327,33 +325,29 @@ impl Guest for TcpEngine {
                     inc_stat!(STAT_TO_LINUX);
                     ROUTE_LINUX
                 };
-                actions.push(action);
-                lengths.push(packet.data_len());
+                packet.set_action(action);
+                packet.set_new_length(packet.data_len());
+                processed_count += 1;
             }
-            return (actions, lengths);
+            return processed_count;
         }
-        // =======================================================
 
-        let mut actions = Vec::with_capacity(batch.len());
-        let mut lengths = Vec::with_capacity(batch.len());
-
-        // Lock Global States ONCE per batch
         let mut connections_guard = CONNECTIONS.borrow_mut();
         let Some(pool) = connections_guard.as_mut() else {
             log::error!("process_batch: connection table uninitialized — dropping all packets");
-            let n = batch.len();
-            let mut drop_actions = Vec::with_capacity(n);
-            let mut drop_lengths = Vec::with_capacity(n);
-            drop_actions.resize(n, ROUTE_DROP);
-            drop_lengths.resize(n, 0u32);
-            return (drop_actions, drop_lengths);
+            for mut packet in batch.iter_mut() {
+                packet.set_action(ROUTE_DROP);
+                packet.set_new_length(0);
+                processed_count += 1;
+            }
+            return processed_count;
         };
 
         for mut packet in batch.iter_mut() {
-            let mut action = 0;
-            let mut len = 64;
-            if packet.is_a_tick() {
+            let (action, len) = if packet.is_a_tick() {
                 log::trace!("process_batch: tick");
+                let mut a = ROUTE_DROP;
+                let mut l = 64u32;
                 let mut generated_reply = false;
 
                 // PRIORITY 1: Process Timeout Teardowns
@@ -381,27 +375,28 @@ impl Guest for TcpEngine {
                                 conn.state = TcpState::FinWait1;
                                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                             }
-                            len = write_tcp_reply(
+                            l = write_tcp_reply(
                                 data_ptr, reply_src_mac, reply_dst_mac,
                                 flow_key.2, flow_key.3, flow_key.0, flow_key.1,
                                 snd_nxt, rcv_nxt, FLAG_FIN | FLAG_ACK
                             );
                             inc_stat!(STAT_SENT_FIN);
-                            action = ROUTE_TX;
+                            a = ROUTE_TX;
                             generated_reply = true;
                         } else {
                             pool.remove(&flow_key);
                             inc_stat!(STAT_SENT_RST);
-                            len = write_tcp_reply(
+                            l = write_tcp_reply(
                                 data_ptr, reply_src_mac, reply_dst_mac,
                                 flow_key.2, flow_key.3, flow_key.0, flow_key.1,
                                 snd_nxt, rcv_nxt, FLAG_RST | FLAG_ACK
                             );
-                            action = ROUTE_TX;
+                            a = ROUTE_TX;
                             generated_reply = true;
                         }
                     }
                 }
+
                 // PRIORITY 2: Generate new SYNs
                 if !generated_reply {
                     log::trace!("process_batch: generating new SYN");
@@ -424,7 +419,6 @@ impl Guest for TcpEngine {
 
                             if gen.port_counter >= PORT_END_RANGE {
                                 gen.port_counter = PORT_START_RANGE;
-                                // Shift to the next IP address (cycle through 250 IPs)
                                 gen.ip_offset = (gen.ip_offset + 1) % 250;
                             } else {
                                 gen.port_counter += 1;
@@ -440,37 +434,43 @@ impl Guest for TcpEngine {
                             let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                             let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
-                            len = write_tcp_reply(
+                            l = write_tcp_reply(
                                 data_ptr, reply_src_mac, reply_dst_mac,
                                 our_ip, src_port, their_ip, dst_port,
                                 isn, 0, FLAG_SYN
                             );
                             inc_stat!(STAT_SENT_SYN);
-                            action = ROUTE_TX;
+                            a = ROUTE_TX;
                             generated_reply = true;
                         }
                     }
                 }
+
                 // nothing generated, drop the tick
                 if !generated_reply {
                     inc_stat!(STAT_DROP);
                     inc_stat!(STAT_TICK_DROP);
-                    action = ROUTE_DROP;
-                    len = 64;
+                    a = ROUTE_DROP;
+                    l = 64;
                 }
-            } else if packet.headers().fingerprint() == Packet::TCP_OVER_IPV4 {
-                // TCP FRAME - Delegate to the clean state machine
-                (action, len) = handle_tcp_packet(&mut packet, pool, &local_config);
+                (a, l)
             } else {
-                inc_stat!(STAT_TO_LINUX);
-                action = ROUTE_LINUX;
-                len = packet.data_len();
-            }
-            actions.push(action);
-            lengths.push(len);
+                packet.parse_fast();
+                if packet.fingerprint() == Packet::TCP_OVER_IPV4 {
+                    // TCP FRAME — as_packet() is dropped before set_action/set_new_length
+                    let mut p = packet.as_packet();
+                    handle_tcp_packet(&mut p, pool, &local_config)
+                } else {
+                    inc_stat!(STAT_TO_LINUX);
+                    (ROUTE_LINUX, packet.data_len())
+                }
+            };
+            packet.set_action(action);
+            packet.set_new_length(len);
+            processed_count += 1;
         }
-        log::trace!("process_batch: Finished successfully with {}, {} actions", actions.len(), lengths.len());
-        (actions, lengths)
+        log::trace!("process_batch: Finished successfully with {} packets", processed_count);
+        processed_count
     }
 
     fn process_timers(current_tsc: u64) -> u32 {

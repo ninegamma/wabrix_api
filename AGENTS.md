@@ -14,6 +14,7 @@ These repositories implement a high-performance, software-based networking engin
 2. **Predictable Latency:** Favor deterministic execution paths over peak theoretical throughput.
 3. **Strict Memory Safety:** Leverage Rust's type system to guarantee safety across the Native ↔ Wasm boundary.
 
+
 ***This file is for the xbricks_public repository, only.***
 
 ---
@@ -118,6 +119,10 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 
 * The `host` feature on `xbricks_protocol` exposes `Pdu0` and `HeaderStack` internals publicly — it is **reserved for the host engine** (`xbrix` repo) only.
 * **NEVER** enable `host` in a plugin's `Cargo.toml`. Plugins must only use the `Packet<'a>` API surface.
+
+### E. Unrequested Code Changes
+
+* **NEVER** change fundamental structs like `Packet` , except if explicitely requested. In case the change is needed from your view, write a change request with the exact reasoning. 
 
 ---
 

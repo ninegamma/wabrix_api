@@ -680,6 +680,12 @@ impl Drop for Pdu0 {
 }
 
 impl Pdu0 {
+    /// Creates a local, non-host-owned `Pdu0` from a `WPdu` scratch buffer.
+    /// `ManuallyDrop` prevents the panicking `Drop` impl from firing when the value goes out of scope.
+    pub(crate) fn local(w: WPdu) -> core::mem::ManuallyDrop<Self> {
+        core::mem::ManuallyDrop::new(Pdu0 { w, _do_not_touch_padding: 0 })
+    }
+
     #[inline]
     pub fn slice_from_bytes(bytes: &mut [u8]) -> &mut [Self] {
         let count = bytes.len() / core::mem::size_of::<Self>();
