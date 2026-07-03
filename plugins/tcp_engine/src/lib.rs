@@ -342,7 +342,7 @@ impl Guest for TcpEngine {
         };
 
         for mut packet in batch.iter_mut() {
-            let (action, len) = if packet.is_a_tick() {
+            let (action, _len) = if packet.is_a_tick() {
                 log::trace!("process_batch: tick");
                 let mut a = ROUTE_DROP;
                 let mut l = 64u32;
@@ -424,7 +424,6 @@ impl Guest for TcpEngine {
 
                             let dst_port = 80;
                             let their_ip = u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
-
                             let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
                             pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1), 0, CURRENT_TSC.get());
 
@@ -444,7 +443,6 @@ impl Guest for TcpEngine {
                     }
                 }
 
-                // nothing generated, drop the tick
                 if !generated_reply {
                     inc_stat!(STAT_DROP);
                     inc_stat!(STAT_TICK_DROP);
@@ -455,7 +453,6 @@ impl Guest for TcpEngine {
             } else {
                 packet.parse_fast();
                 if packet.fingerprint() == Packet::TCP_OVER_IPV4 {
-                    // TCP FRAME — as_packet() is dropped before set_action/set_new_length
                     let mut p = packet.as_packet();
                     handle_tcp_packet(&mut p, pool, &local_config)
                 } else {
