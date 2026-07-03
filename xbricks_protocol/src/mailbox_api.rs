@@ -1,6 +1,5 @@
-use core::marker::PhantomData;
 use crate::BatchMetadata;
-use crate::exports::{Pdu0, WPdu};
+use crate::exports::Pdu0;
 use crate::packet::Packet;
 
 // =============================================================================
@@ -9,19 +8,16 @@ use crate::packet::Packet;
 
 /// A batch backed by the shared UMEM mailbox rather than an inline byte slice.
 ///
-/// The host writes `desc_addrs` and `lengths` into the `BatchMetadata` before
-/// calling `process-batch`. The plugin reads them, processes each packet in
-/// place, then writes routing decisions back into `actions` / `new_lengths`.
-pub struct MailboxBatch {
-    mailbox_ptr: *mut BatchMetadata,
-    batch_size: usize,
+/// The host writes `pdus` into the `BatchMetadata` before calling `process-batch`.
+/// The plugin processes each packet in place, then writes routing decisions back
+/// into `actions`.
+pub struct MailboxBatch<'a> {
+    pdus: &'a mut [Pdu0],
+    actions: &'a mut [u32],
     umem_base: usize,
 }
 
-// SAFETY: WASM is single-threaded; the raw pointer is valid for the lifetime of the call.
-unsafe impl Send for MailboxBatch {}
-
-impl MailboxBatch {
+impl<'a> MailboxBatch<'a> {
     /// Constructs a `MailboxBatch` from the three arguments passed by the host.
     ///
     /// - `batch_size`: number of valid slots in the mailbox.
@@ -32,36 +28,52 @@ impl MailboxBatch {
     pub fn new(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> Self {
         let umem_base = (0u32).wrapping_sub(partition_offset) as usize;
         let mailbox_ptr = (umem_base + mailbox_offset as usize) as *mut BatchMetadata;
-        Self { mailbox_ptr, batch_size: batch_size as usize, umem_base }
+
+        // SAFETY: The host guarantees `mailbox_ptr` points to a valid, exclusively-owned
+        // `BatchMetadata` for the duration of the `process-batch` call.
+        let mailbox = unsafe { &mut *mailbox_ptr };
+        let len = batch_size as usize;
+
+        Self {
+            pdus: &mut mailbox.pdus[..len],
+            actions: &mut mailbox.actions[..len],
+            umem_base,
+        }
     }
 
     #[inline(always)]
-    pub fn len(&self) -> usize { self.batch_size }
+    pub fn len(&self) -> usize { self.pdus.len() }
 
     #[inline(always)]
-    pub fn is_empty(&self) -> bool { self.batch_size == 0 }
+    pub fn is_empty(&self) -> bool { self.pdus.is_empty() }
 
     /// Iterates over each packet slot, yielding a `MailboxPacket` for each one.
-    /// The iterator pre-populates a local `WPdu` from the mailbox's `desc_addrs`/`lengths`.
     #[inline(always)]
     pub fn iter_mut(&mut self) -> MailboxBatchIter<'_> {
         MailboxBatchIter {
-            mailbox_ptr: self.mailbox_ptr,
+            iter: self.pdus.iter_mut().zip(self.actions.iter_mut()),
             umem_base: self.umem_base,
-            idx: 0,
-            total: self.batch_size,
-            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a> IntoIterator for MailboxBatch<'a> {
+    type Item = MailboxPacket<'a>;
+    type IntoIter = MailboxBatchIter<'a>;
+
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        MailboxBatchIter {
+            iter: self.pdus.iter_mut().zip(self.actions.iter_mut()),
+            umem_base: self.umem_base,
         }
     }
 }
 
 /// Iterator over `MailboxBatch` that yields one `MailboxPacket` per slot.
 pub struct MailboxBatchIter<'a> {
-    mailbox_ptr: *mut BatchMetadata,
+    iter: core::iter::Zip<core::slice::IterMut<'a, Pdu0>, core::slice::IterMut<'a, u32>>,
     umem_base: usize,
-    idx: usize,
-    total: usize,
-    _phantom: PhantomData<&'a mut BatchMetadata>,
 }
 
 impl<'a> Iterator for MailboxBatchIter<'a> {
@@ -69,49 +81,25 @@ impl<'a> Iterator for MailboxBatchIter<'a> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.idx >= self.total {
-            return None;
-        }
-        // SAFETY: idx < total, which is bounded by the host-provided batch_size (<= MAX_BATCH_SIZE).
-        let (desc_addr, length) = unsafe {
-            let m = &*self.mailbox_ptr;
-            (m.desc_addrs[self.idx], m.lengths[self.idx])
-        };
-
-        let mut wpdu = WPdu::default();
-        wpdu.desc_addr = desc_addr as u64;
-        wpdu.desc_len  = length;
-
-        let item = MailboxPacket {
-            pdu: Pdu0::local(wpdu),
-            umem_base: self.umem_base,
-            idx: self.idx,
-            mailbox_ptr: self.mailbox_ptr,
-            _phantom: PhantomData,
-        };
-        self.idx += 1;
-        Some(item)
+        let (pdu, action) = self.iter.next()?;
+        Some(MailboxPacket { pdu, umem_base: self.umem_base, action })
     }
 }
 
 /// A single packet slot from a `MailboxBatch`.
 ///
-/// Owns a local `Pdu0` populated from the mailbox inputs. Call `parse_fast()` before
-/// accessing any header accessors. Writes results back to the mailbox via
-/// `set_action()` / `set_new_length()`.
-///
-/// As Pdu0 must not be dropped, dropping is prevented here using `ManuallyDrop`.
+/// Holds a direct mutable reference into the host-written `Pdu0` in the mailbox.
+/// Call `parse_fast()` before accessing any header accessors. Write the routing
+/// decision back via `set_action()`.
 pub struct MailboxPacket<'a> {
-    pdu: core::mem::ManuallyDrop<Pdu0>,
+    pdu: &'a mut Pdu0,
     umem_base: usize,
-    idx: usize,
-    mailbox_ptr: *mut BatchMetadata,
-    _phantom: PhantomData<&'a mut BatchMetadata>,
+    action: &'a mut u32,
 }
 
 impl<'a> MailboxPacket<'a> {
-    /// Parse packet headers into the local `WPdu`. Must be called before `fingerprint()` or
-    /// any header accessor on a `Packet` obtained via `as_packet()`.
+    /// Parse packet headers. Must be called before `fingerprint()` or any header
+    /// accessor on a `Packet` obtained via `as_packet()`.
     #[inline(always)]
     pub fn parse_fast(&mut self) -> usize {
         self.pdu.parse_fast(self.umem_base)
@@ -140,26 +128,16 @@ impl<'a> MailboxPacket<'a> {
         self.pdu.header_stack.fingerprint()
     }
 
-    /// Creates a temporary `Packet<'_>` that borrows this packet's local `WPdu`.
+    /// Creates a temporary `Packet<'_>` that borrows this packet's `Pdu0`.
     /// Use this to call functions that take `&mut Packet<'_>` (e.g. `handle_tcp_packet`).
-    /// The borrow ends when the returned `Packet` is dropped.
     #[inline(always)]
     pub fn as_packet(&mut self) -> Packet<'_> {
-        Packet::new(&mut *self.pdu, self.umem_base)
+        Packet::new(self.pdu, self.umem_base)
     }
 
     /// Write the routing decision for this packet back into the mailbox.
     #[inline(always)]
     pub fn set_action(&mut self, action: u32) {
-        // SAFETY: idx < batch_size (enforced by iterator), mailbox_ptr is valid for the call window.
-        unsafe { (*self.mailbox_ptr).actions[self.idx] = action; }
-    }
-
-    /// Write the new packet length back into the mailbox.
-    /// Pass `0` to leave the length unchanged (the host will keep the original).
-    #[inline(always)]
-    pub fn set_new_length(&mut self, new_len: u32) {
-        // SAFETY: same as set_action.
-        unsafe { (*self.mailbox_ptr).new_lengths[self.idx] = new_len; }
+        *self.action = action;
     }
 }

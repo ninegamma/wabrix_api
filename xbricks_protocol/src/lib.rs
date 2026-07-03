@@ -1,5 +1,8 @@
 #![no_std]
 extern crate alloc;
+
+use crate::wpdu_impl::Pdu0;
+
 pub mod headers;
 pub mod helpers;
 pub mod packet;
@@ -94,11 +97,7 @@ impl From<PluginOpcode> for u32 {
 #[repr(C)]
 pub struct BatchMetadata {
     /// Written by host before calling process-batch: AF_XDP frame descriptor offsets (UMEM-relative)
-    pub desc_addrs:  [u32; MAX_BATCH_SIZE],
-    /// Written by host before calling process-batch: original packet lengths in bytes
-    pub lengths:     [u32; MAX_BATCH_SIZE],
+    pub pdus:  [Pdu0; MAX_BATCH_SIZE],
     /// Written by plugin during process-batch: routing decisions (route_id)
     pub actions:     [u32; MAX_BATCH_SIZE],
-    /// Written by plugin during process-batch: new packet length (0 = unchanged)
-    pub new_lengths: [u32; MAX_BATCH_SIZE],
 }

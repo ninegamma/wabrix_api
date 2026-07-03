@@ -326,7 +326,6 @@ impl Guest for TcpEngine {
                     ROUTE_LINUX
                 };
                 packet.set_action(action);
-                packet.set_new_length(packet.data_len());
                 processed_count += 1;
             }
             return processed_count;
@@ -337,7 +336,6 @@ impl Guest for TcpEngine {
             log::error!("process_batch: connection table uninitialized — dropping all packets");
             for mut packet in batch.iter_mut() {
                 packet.set_action(ROUTE_DROP);
-                packet.set_new_length(0);
                 processed_count += 1;
             }
             return processed_count;
@@ -466,7 +464,6 @@ impl Guest for TcpEngine {
                 }
             };
             packet.set_action(action);
-            packet.set_new_length(len);
             processed_count += 1;
         }
         log::trace!("process_batch: Finished successfully with {} packets", processed_count);
