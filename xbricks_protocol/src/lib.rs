@@ -13,6 +13,8 @@ mod wpdu_impl;
 // (It will decide internally what to actually export).
 pub mod exports;
 mod hstack;
+pub mod connections;
+pub mod tcp_common;
 
 /// The maximum number of packets in a single batch.
 pub const MAX_BATCH_SIZE: usize = 512;

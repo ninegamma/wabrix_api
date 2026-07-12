@@ -1,8 +1,8 @@
 #![no_std]
 
-pub mod connections;
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ptr;
 use core::cell::{Cell, RefCell};
@@ -16,9 +16,11 @@ use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, upda
 use xbricks_protocol::{PluginOpcode, StandardOpcode};
 use xbricks_protocol::mailbox_api::MailboxBatch;
 use xbricks_protocol::packet::Packet;
-use crate::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
+use xbricks_protocol::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::xbricks::plugins::packet_engine::Guest;
 use crate::xbricks::plugins::logging;
+
+use xbricks_protocol::tcp_common::{EngineConfig, SynGenerator, TimeoutStack, run_tcp_state_machine, write_tcp_reply, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_START_RANGE, PORT_END_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED, STAT_TICK_DROP};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
@@ -70,108 +72,10 @@ impl<T> WasmValue<T> {
 }
 
 
-
-// Standard TCP Flags
-const FLAG_FIN: u8 = 0x01;
-const FLAG_SYN: u8 = 0x02;
-const FLAG_RST: u8 = 0x04;
-const FLAG_ACK: u8 = 0x10;
-
-// 1. Define a structured config to hold parsed data
-#[derive(Clone, Default)]
-struct EngineConfig {
-    src_mac: Option<[u8; 6]>,
-    dst_mac: Option<[u8; 6]>,
-    src_ip: Option<[u8; 4]>,
-    dst_ip: Option<[u8; 4]>,
-    rng_seed: Option<u32>,
-    syn_rate: Option<u64>,
-    tsc_frequency: u64,
-    syn_limit: Option<u64>,
-    close_timeout_millis: Option<u64>,
-    /// Whether to bypass the TCP engine and forward packets to the standard Linux networking stack.
-    bypass: bool,
-}
-
-struct SynGenerator {
-    last_tsc: u64,
-    cycle_accumulator: u128,
-    port_counter: u16,
-    /// if ports are exhausted, we increase the IP address
-    ip_offset: u32,
-    /// Simple seed for ISNs
-    prng_state: u32,
-    /// Track total SYNs generated
-    syns_sent: u64,
-    activated: bool,
-}
 const MAX_TIMEOUTS: usize = 131072;  // 128k timeouts
 
-// Add a dummy constructor to your FlowKey (if you don't have one)
-impl FlowKey {
-    pub const fn empty() -> Self {
-        Self(0, 0, 0, 0)
-    }
-}
 
-pub struct TimeoutStack {
-    // We dropped the Option! Array is now densely packed at 12 bytes per slot.
-    items: [FlowKey; MAX_TIMEOUTS],
-    len: usize,
-}
 
-impl TimeoutStack {
-    pub const fn new() -> Self {
-        Self {
-            // Fill the array with dummy data. We will overwrite it later.
-            items: [FlowKey::empty(); MAX_TIMEOUTS],
-            len: 0,
-        }
-    }
-
-    pub fn push(&mut self, key: FlowKey) {
-        if self.len < MAX_TIMEOUTS {
-            self.items[self.len] = key; // Overwrite the dummy/old data
-            self.len += 1;
-        }
-    }
-
-    pub fn pop(&mut self) -> Option<FlowKey> {
-        if self.len > 0 {
-            self.len -= 1;
-            // Return a copy of the valid key. The old data remains in the array
-            // as garbage, but the `len` pointer ensures we never read it again.
-            Some(self.items[self.len])
-        } else {
-            None
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.len = 0;
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-}
-
-impl core::iter::Extend<FlowKey> for TimeoutStack {
-    /// Extends the stack with items from an iterator.
-    /// Safely drops any excess items if `MAX_TIMEOUTS` is reached.
-    fn extend<T: IntoIterator<Item = FlowKey>>(&mut self, iter: T) {
-        for key in iter {
-            if self.len < MAX_TIMEOUTS {
-                self.items[self.len] = key;
-                self.len += 1;
-            } else {
-                // The queue is full. Break early to ignore the remaining items
-                // and naturally apply backpressure to the scavenger.
-                break;
-            }
-        }
-    }
-}
 
 static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
@@ -195,30 +99,6 @@ const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
 
 
-pub const STAT_SENT_SYN: usize = 0;
-pub const STAT_SENT_SYNACK: usize = 1;
-pub const STAT_SENT_SYNACK2: usize = 2;
-pub const STAT_SENT_FIN: usize = 3;
-pub const STAT_SENT_FIN_PSSV: usize = 4;
-pub const STAT_SENT_ACK4FIN: usize = 5;
-pub const STAT_SENT_ACK: usize = 6;
-pub const STAT_SENT_RST: usize = 7;
-pub const STAT_RECV_SYN: usize = 8;
-pub const STAT_RECV_SYNACK: usize = 9;
-pub const STAT_RECV_SYNACK2: usize = 10;
-pub const STAT_RECV_FIN: usize = 11;
-pub const STAT_RECV_FIN_PSSV: usize = 12;
-pub const STAT_RECV_ACK4FIN: usize = 13;
-pub const STAT_RECV_ACK: usize = 14;
-pub const STAT_RECV_RST: usize = 15;
-pub const STAT_UNEXPECTED: usize = 16;
-pub const STAT_RECV_PAYLOAD: usize = 17;
-pub const STAT_SENT_PAYLOAD: usize = 18;
-pub const STAT_TICK_DROP: usize = 19;
-pub const STAT_TO_LINUX: usize = 20;
-pub const STAT_DROP: usize = 21;
-pub const STAT_COUNT: usize = 22;
-
 // The zero-cost global counter array
 static TCP_STATS: WasmCell<[u64; STAT_COUNT]> = WasmCell::new([0; STAT_COUNT]);
 
@@ -228,10 +108,6 @@ macro_rules! inc_stat {
         TCP_STATS.borrow_mut()[$stat] += 1
     }
 }
-
-
-const PORT_START_RANGE: u16 = 10000;
-const PORT_END_RANGE: u16 = 65535;
 
 struct HostLogger;
 
@@ -265,10 +141,10 @@ pub fn init_logging() {
 
 const MAX_CONNECTIONS: usize = 524_288;
 
-fn init_state_machine() {
+fn init_state_machine(tcp_node_name: String) {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
     // but it will NEVER trigger a resize or memory.grow during execution.
-    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(MAX_CONNECTIONS));
+    *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(MAX_CONNECTIONS, tcp_node_name));
 }
 
 
@@ -286,16 +162,22 @@ impl Guest for TcpEngine {
     // The init_data function should also set the tsc_frequency value in the EngineConfig struct.
     // The init_data function should return a boolean value indicating whether the initialization was successful.
     // If the initialization is successful, the plugin will be ready to process batches.
-    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency:u64) {
+    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency: u64) {
         init_logging();
         let mut config = EngineConfig::default();
         config.bypass = false;
-        init_state_machine();
+
+        let mut raw_src_ip: Option<alloc::string::String> = None;
+
         for (key, value) in data {
             match key.as_str() {
+                "name" => config.name = Some(value),
                 "src_mac" => config.src_mac = parse_mac(&value),
                 "dst_mac" => config.dst_mac = parse_mac(&value),
-                "src_ip" => config.src_ip = parse_ip(&value),
+                "src_ip" => {
+                    raw_src_ip = Some(value.clone());
+                    config.src_ip = parse_ip(&value);
+                }
                 "dst_ip" => config.dst_ip = parse_ip(&value),
                 "rng_seed" => config.rng_seed = value.parse::<u32>().ok(),
                 "syn_rate" => config.syn_rate = parse_suffixed_number(&value).ok(),
@@ -304,6 +186,14 @@ impl Guest for TcpEngine {
                 _ => {}
             }
         }
+
+        // Resolve node name using fallback chain
+        let node_name = config.name.clone()
+            .or(raw_src_ip)
+            .unwrap_or_else(|| alloc::string::String::from("unknown"));
+
+        init_state_machine(node_name);
+
         config.tsc_frequency = tsc_frequency;
         *CONFIG.borrow_mut() = Some(config);
     }
@@ -698,8 +588,10 @@ fn handle_tcp_packet(
     let action_opt;
     let mut current_state = None;
 
+    // Replace inside handle_tcp_packet (in the Wasm plugin):
+    let mut stats_guard = TCP_STATS.borrow_mut();
     if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
-        action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len);
+        action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len, &mut stats_guard);
         current_state = Some(conn.state);
     } else {
         if tcp_flags & FLAG_RST != 0 {
@@ -751,225 +643,6 @@ fn handle_tcp_packet(
     (ROUTE_DROP, 0)
 }
 
-/// The core RFC 793 State Machine Logic
-fn run_tcp_state_machine(
-    conn: &mut ConnectionNode,
-    tcp_flags: u8,
-    seq_num: u32,
-    ack_num: u32,
-    payload_len: u32,
-) -> Option<(u8, u32, u32)> {
-
-    // Fast-path: Reset drops connection instantly
-    if tcp_flags & FLAG_RST != 0 {
-        inc_stat!(STAT_RECV_RST);
-        conn.state = TcpState::Closed;
-        return None;
-    }
-
-    // ==========================================
-    // INCOMING PACKET TRACKING
-    // ==========================================
-    if tcp_flags & FLAG_FIN != 0 {
-        inc_stat!(STAT_RECV_FIN);
-    } else if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 {
-        inc_stat!(STAT_RECV_SYNACK);
-    } else if payload_len > 0 {
-        inc_stat!(STAT_RECV_PAYLOAD);
-    } else if tcp_flags & FLAG_ACK != 0 {
-        // Categorize the ACK based on our current state
-        match conn.state {
-            TcpState::SynReceived => inc_stat!(STAT_RECV_SYNACK2),
-            TcpState::FinWait1 | TcpState::LastAck | TcpState::Closing => inc_stat!(STAT_RECV_ACK4FIN),
-            _ => inc_stat!(STAT_RECV_ACK),
-        }
-    }
-
-    macro_rules! reply {
-        ($flags:expr) => { Some(($flags, conn.snd_nxt, conn.rcv_nxt)) }
-    }
-
-    // ==========================================
-    // STATE TRANSITIONS & OUTGOING TRACKING
-    // ==========================================
-    match conn.state {
-        TcpState::Listen => {
-            if tcp_flags & FLAG_SYN != 0 {
-                conn.state = TcpState::SynReceived;
-                conn.rcv_nxt = seq_num.wrapping_add(1);
-                let send_seq = conn.snd_nxt;
-                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-                inc_stat!(STAT_SENT_SYNACK);
-                return Some((FLAG_SYN | FLAG_ACK, send_seq, conn.rcv_nxt));
-            }
-        }
-        TcpState::SynSent => {
-            if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 {
-                if ack_num == conn.snd_nxt {
-                    conn.state = TcpState::Established;
-                    conn.rcv_nxt = seq_num.wrapping_add(1);
-                    inc_stat!(STAT_SENT_SYNACK2); // Final ACK of the 3-way handshake
-                    return reply!(FLAG_ACK);
-                } else {
-                    inc_stat!(STAT_SENT_RST);
-                    return Some((FLAG_RST, ack_num, 0)); // Bad ACK sequence
-                }
-            } else if tcp_flags & FLAG_RST != 0 {
-                conn.state = TcpState::Closed; // Connection refused
-            }
-        }
-        TcpState::SynReceived => {
-            if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
-                conn.state = TcpState::Established;
-            }
-        }
-        TcpState::Established => {
-            if tcp_flags & FLAG_FIN != 0 {
-                conn.state = TcpState::LastAck;
-                conn.rcv_nxt = seq_num.wrapping_add(1).wrapping_add(payload_len);
-                let send_seq = conn.snd_nxt;
-                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-
-                inc_stat!(STAT_SENT_FIN_PSSV);
-                inc_stat!(STAT_SENT_ACK4FIN);
-                return Some((FLAG_FIN | FLAG_ACK, send_seq, conn.rcv_nxt));
-            } else if tcp_flags & FLAG_ACK != 0 && payload_len > 0 {
-                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
-
-                inc_stat!(STAT_SENT_ACK); // Pure data acknowledgment
-                return reply!(FLAG_ACK);
-            }
-        }
-        TcpState::Established => {
-            if tcp_flags & FLAG_FIN != 0 {
-                // Passive Close
-                conn.state = TcpState::LastAck;
-
-                // Only advance rcv_nxt if the FIN is actually in sequence
-                if seq_num == conn.rcv_nxt {
-                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
-                }
-
-                let send_seq = conn.snd_nxt;
-                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-
-                inc_stat!(STAT_SENT_FIN_PSSV);
-                inc_stat!(STAT_SENT_ACK4FIN);
-                return Some((FLAG_FIN | FLAG_ACK, send_seq, conn.rcv_nxt));
-            } else if tcp_flags & FLAG_ACK != 0 {
-                if payload_len > 0 {
-                    if seq_num == conn.rcv_nxt {
-                        // In-order data: advance the receive window
-                        conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
-                        inc_stat!(STAT_SENT_ACK);
-                        return reply!(FLAG_ACK);
-                    } else {
-                        // Out-of-order or Retransmission: Send duplicate ACK (Fast Retransmit trigger)
-                        inc_stat!(STAT_SENT_ACK);
-                        return reply!(FLAG_ACK);
-                    }
-                } else {
-                    // payload_len == 0 (Pure ACK)
-                    // Check if it's a Keepalive (seq_num is exactly 1 byte before rcv_nxt)
-                    if seq_num == conn.rcv_nxt.wrapping_sub(1) {
-                        inc_stat!(STAT_SENT_ACK);
-                        return reply!(FLAG_ACK); // Echo the ACK to keep the connection alive
-                    }
-                    // Otherwise, it's just a duplicate ACK. Drop it to save TX bandwidth.
-                }
-            }
-        }
-        TcpState::FinWait2 => {
-            if tcp_flags & FLAG_FIN != 0 {
-                conn.state = TcpState::Closed;
-                conn.rcv_nxt = seq_num.wrapping_add(1);
-                inc_stat!(STAT_SENT_ACK4FIN);
-                return reply!(FLAG_ACK);
-            }
-        }
-        TcpState::Closing => {
-            if tcp_flags & FLAG_ACK != 0 {
-                conn.state = TcpState::Closed;
-            }
-        }
-        TcpState::LastAck => {
-            if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
-                conn.state = TcpState::Closed;
-            }
-        }
-        TcpState::Closed => {
-            if tcp_flags & FLAG_RST == 0 {
-                inc_stat!(STAT_SENT_RST);
-                return Some((FLAG_RST | FLAG_ACK, 0, seq_num.wrapping_add(payload_len)));
-            }
-        }
-        _ => {}
-    }
-
-    None
-}
-
-/// Formats the outbound headers back into WASM linear memory
-fn write_tcp_reply(
-    data_ptr: *mut u8,
-    src_mac: [u8; 6],
-    dst_mac: [u8; 6],
-    src_ip: u32,
-    src_port: u16,
-    dst_ip: u32,
-    dst_port: u16,
-    seq_num: u32,
-    ack_num: u32,
-    flags: u8,
-) -> u32 {
-    let mut mac = MacHeader::new();
-    mac.src = MacAddr6::new(src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
-    mac.dst = MacAddr6::new(dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5]);
-    mac.set_ethertype(EtherType::Ipv4);
-
-    let mut ip = IpHeader::new();
-    ip.set_src(src_ip);
-    ip.set_dst(dst_ip);
-    ip.set_ttl(64);
-    ip.set_version(4);
-    ip.set_protocol(6);
-    ip.set_ihl(5);
-    ip.set_length(40);
-    ip.set_flags(0x2);
-
-    ip.update_checksum();
-
-    let mut tcp = TcpHeader::new();
-    tcp.set_flags(flags);
-    tcp.set_src_port(src_port);
-    tcp.set_dst_port(dst_port);
-    tcp.set_data_offset(5);
-    tcp.set_seq_num(seq_num);
-    tcp.set_ack_num(ack_num);
-
-    // we have space to receive data!
-    tcp.set_window_size(64240);
-
-    // Because this is a pure protocol reply (SYN/ACK/RST) with no application data,
-    // the IP payload size is exactly the size of the TCP header (20 bytes).
-    update_tcp_checksum(&mut tcp, 20, src_ip, dst_ip);
-
-    let mac_size = core::mem::size_of::<MacHeader>();
-    let ip_size = core::mem::size_of::<IpHeader>();
-    let tcp_size = core::mem::size_of::<TcpHeader>();
-
-    // SAFETY: `data_ptr` comes from `packet.data_ptr_mut()`, which returns a valid pointer into
-    // the WASM linear memory frame. The combined header size (54 bytes) is well below the
-    // minimum WASM frame size. `mac`, `ip`, and `tcp` are local stack variables; source and
-    // destination regions do not overlap. All three types are `Copy` + `#[repr(C)]`.
-    unsafe {
-        ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
-        ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size) as *mut IpHeader, 1);
-        ptr::copy_nonoverlapping(&tcp, data_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
-    }
-
-    (mac_size + ip_size + tcp_size) as u32
-}
 
 // Export the implementation to the runtime
 export!(TcpEngine);

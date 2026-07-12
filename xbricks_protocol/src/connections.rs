@@ -1,9 +1,9 @@
-use crate::MAX_CONNECTIONS;
+use alloc::string::String;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum TcpState {
+pub enum TcpState {
     Closed,
     Listen,
     SynSent,
@@ -20,31 +20,37 @@ pub(crate) enum TcpState {
 // The 4-Tuple that uniquely identifies a TCP connection
 // (Src IP, Src Port, Dst IP, Dst Port)
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub(crate) struct FlowKey(pub u32, pub u16, pub u32, pub u16);
+pub struct FlowKey(pub u32, pub u16, pub u32, pub u16);
 
+// Add a dummy constructor to your FlowKey (if you don't have one)
+impl FlowKey {
+    pub const fn empty() -> Self {
+        Self(0, 0, 0, 0)
+    }
+}
 
-pub(crate) struct ConnectionNode {
+pub struct ConnectionNode {
     // -----------------------------------------
     // 8-BYTE ALIGNED FIELDS
     // -----------------------------------------
-    pub(crate) last_active_tsc: u64, // 8 bytes
+    pub last_active_tsc: u64, // 8 bytes
 
     // -----------------------------------------
     // 4-BYTE ALIGNED FIELDS
     // -----------------------------------------
     // Assuming FlowKey is (usize, usize, u16, u16) = 12 bytes
-    pub(crate) key: FlowKey,         // 12 bytes
-    pub(crate) snd_nxt: u32,         // 4 bytes
-    pub(crate) rcv_nxt: u32,         // 4 bytes
+    pub key: FlowKey,         // 12 bytes
+    pub snd_nxt: u32,         // 4 bytes
+    pub rcv_nxt: u32,         // 4 bytes
 
     // Replaced Option<usize> (8 bytes each) with usize (4 bytes each)
-    pub(crate) prev: usize,            // 4 bytes
-    pub(crate) next: usize,            // 4 bytes
+    pub prev: usize,            // 4 bytes
+    pub next: usize,            // 4 bytes
 
     // -----------------------------------------
     // 1-BYTE ALIGNED FIELDS
     // -----------------------------------------
-    pub(crate) state: TcpState,      // 1 byte
+    pub state: TcpState,      // 1 byte
 
     // -----------------------------------------
     // RUST COMPILER INJECTS 3 BYTES OF PADDING HERE
@@ -64,7 +70,8 @@ pub const NULL_NODE:  usize = usize::MAX;       // arena free-list / linked-list
 pub const EMPTY_SLOT: usize = usize::MAX;       // hash table: slot was never occupied — stops linear probe
 pub const TOMBSTONE:  usize = usize::MAX - 1;   // hash table: slot was deleted — probe must continue
 
-pub(crate) struct ConnectionPool {
+pub struct ConnectionPool {
+    tcp_node_name: String,
     map: HashMap<FlowKey, usize>,
     arena: Vec<ConnectionNode>,
 
@@ -76,7 +83,10 @@ pub(crate) struct ConnectionPool {
     free_head: usize,
 
     // - Watermark for the uninitialized portion of the arena
-    pub(crate) watermark: usize,
+    pub watermark: usize,
+
+    // - Suppress repeated "pool full" log spam: true while pool is at capacity
+    pool_full_logged: bool,
 }
 
 impl FlowKey {
@@ -103,15 +113,17 @@ impl FlowKey {
 }
 
 impl ConnectionPool {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, tcp_node_name: String) -> Self {
         Self {
             // Pre-allocating guarantees zero allocations on the hot path
+            tcp_node_name,
             map: HashMap::with_capacity(capacity),
             arena: Vec::with_capacity(capacity),
             head: NULL_NODE,
             tail: NULL_NODE,
             free_head: NULL_NODE,
             watermark: 0,
+            pool_full_logged: false,
         }
     }
 
@@ -121,6 +133,7 @@ impl ConnectionPool {
         self.head = NULL_NODE;
         self.tail = NULL_NODE;
         self.free_head = NULL_NODE;
+        self.watermark = 0;
     }
 
     /// O(1) Unlink a node from its current position in the linked list
@@ -163,7 +176,7 @@ impl ConnectionPool {
     }
 
     /// O(1) Insert a brand new connection or update an existing one
-    pub fn insert(&mut self, key: FlowKey, state: TcpState, snd_nxt: u32, rcv_nxt: u32, tsc: u64) {
+    pub fn insert(&mut self, key: FlowKey, state: TcpState, snd_nxt: u32, rcv_nxt: u32, tsc: u64) -> bool {
         // FAST PATH: Overwrite existing duplicate connection
         if let Some(&existing_idx) = self.map.get(&key) {
             log::warn!("HashMap already contains connection key: {:?}. Overwriting.", key);
@@ -177,7 +190,7 @@ impl ConnectionPool {
             // Move it to the tail of the linked list so it is marked as "new"
             self.unlink(existing_idx);
             self.push_tail(existing_idx);
-            return;
+            return true;
         }
 
         // NEW CONNECTION: Allocate from free list or push to arena
@@ -190,22 +203,26 @@ impl ConnectionPool {
         } else {
             // SAFETY VALVE: Prevent Wasm OOM by stopping vector reallocation
             if self.arena.len() == self.arena.capacity() {
-                log::error!(
-                    "TCP Engine: Connection pool capacity ({}) exhausted! Dropping new connection: {:?}",
-                    self.arena.capacity(),
-                    key
-                );
-                return;
+                if !self.pool_full_logged {
+                    self.pool_full_logged = true;
+                    log::warn!("TCP node {}: connection pool full ({} slots) — new connections dropped until pool drains", self.tcp_node_name, self.arena.capacity());
+                }
+                return false;
             }
             // Allocate a new slot
             let new_idx = self.arena.len();
             self.arena.push(ConnectionNode { key, state, snd_nxt, rcv_nxt, last_active_tsc: tsc, prev: NULL_NODE, next: NULL_NODE });
+
+            // Continuously track the peak allocation of the arena
+            self.watermark = self.arena.len();
+
             new_idx
         };
 
         // Insert into map and linked list
         self.map.insert(key, index);
         self.push_tail(index);
+        true
     }
 
     /// O(1) Get a mutable reference without modifying the linked list or timestamp
@@ -236,6 +253,8 @@ impl ConnectionPool {
             // Push to free list so the memory can be reused
             self.arena[index].next = self.free_head;
             self.free_head = index;
+            // Allow the "pool full" warning to fire again once capacity is available
+            self.pool_full_logged = false;
         }
     }
 
