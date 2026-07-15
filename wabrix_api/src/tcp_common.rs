@@ -17,7 +17,7 @@ pub const FLAG_ACK: u8 = 0x10;
 pub const PORT_START_RANGE: u16 = 10000;
 pub const PORT_END_RANGE: u16 = 65535;
 pub const MAX_CONNECTIONS: usize = 1_048_576;
-pub const MAX_TIMEOUTS: usize = 131_072;
+pub const MAX_TIMEOUTS: usize = 262_144;
 
 // Telemetry Stat Indices
 pub const STAT_SENT_SYN: usize = 0;
@@ -118,6 +118,11 @@ impl TimeoutStack {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    // Returns the exact number of slots currently free
+    pub fn available_capacity(&self) -> usize {
+        MAX_TIMEOUTS - self.len
     }
 
     pub fn is_empty(&self) -> bool {
@@ -222,17 +227,18 @@ pub fn run_tcp_state_machine(
     }
 
     if tcp_flags & FLAG_FIN != 0 {
-        inc_stat!(STAT_RECV_FIN);
+        if conn.state == TcpState::Established {
+            inc_stat!(STAT_RECV_FIN_PSSV);
+        } else {
+            inc_stat!(STAT_RECV_FIN);
+        }
     } else if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 {
         inc_stat!(STAT_RECV_SYNACK);
     } else if payload_len > 0 {
         inc_stat!(STAT_RECV_PAYLOAD);
     } else if tcp_flags & FLAG_ACK != 0 {
         match conn.state {
-            TcpState::SynReceived => inc_stat!(STAT_RECV_SYNACK2),
-            TcpState::FinWait1 | TcpState::LastAck | TcpState::Closing => {
-                inc_stat!(STAT_RECV_ACK4FIN)
-            }
+            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => (),
             _ => inc_stat!(STAT_RECV_ACK),
         }
     }
@@ -266,6 +272,7 @@ pub fn run_tcp_state_machine(
         TcpState::SynReceived => {
             if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
                 conn.state = TcpState::Established;
+                inc_stat!(STAT_RECV_SYNACK2);
             }
         }
         TcpState::Established => {
@@ -301,21 +308,49 @@ pub fn run_tcp_state_machine(
                 return reply!(FLAG_ACK);
             }
         }
+        TcpState::FinWait1 => {
+            if tcp_flags & FLAG_FIN != 0 {
+                if seq_num == conn.rcv_nxt {
+                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
+                }
+                inc_stat!(STAT_SENT_ACK4FIN);
+                if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
+                    // Client ACKed our FIN and sent theirs simultaneously
+                    conn.state = TcpState::Closed;
+                    inc_stat!(STAT_RECV_ACK4FIN);
+                } else {
+                    conn.state = TcpState::Closing;
+                }
+                return reply!(FLAG_ACK);
+            } else if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
+                conn.state = TcpState::FinWait2;
+                inc_stat!(STAT_RECV_ACK4FIN);
+            }
+        }
+        TcpState::CloseWait => {
+            if tcp_flags & FLAG_FIN != 0 {
+                // Retransmit ACK for FIN if client missed the first pure ACK
+                inc_stat!(STAT_SENT_ACK4FIN);
+                return reply!(FLAG_ACK);
+            }
+        }
         TcpState::Closing => {
             if tcp_flags & FLAG_ACK != 0 {
                 conn.state = TcpState::Closed;
+                inc_stat!(STAT_RECV_ACK4FIN);
             }
         }
         TcpState::LastAck => {
             if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
                 conn.state = TcpState::Closed;
+                inc_stat!(STAT_RECV_ACK4FIN);
             }
         }
         TcpState::Closed => {
             if tcp_flags & FLAG_RST == 0 {
                 inc_stat!(STAT_SENT_RST);
                 return Some((
-                    FLAG_RST | FLAG_ACK,
+                    FLAG_RST,
                     0,
                     seq_num.wrapping_add(payload_len),
                 ));

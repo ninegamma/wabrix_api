@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "xbricks_protocol",
+    "wabrix_api",
     "plugins/tcp_engine",
     "plugins/icmp_filter",
     "plugins/filter_plugin",

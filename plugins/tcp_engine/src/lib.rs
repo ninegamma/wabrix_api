@@ -10,21 +10,21 @@ use core::cell::{Cell, RefCell};
 use network_types::eth::EtherType;
 use macaddr::MacAddr6;
 
-use xbricks_protocol::headers::{IpHeader, MacHeader, TcpHeader};
-//use xbricks_protocol::hstack::HeaderStack;
-use xbricks_protocol::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
-use xbricks_protocol::{PluginOpcode, StandardOpcode};
-use xbricks_protocol::mailbox_api::MailboxBatch;
-use xbricks_protocol::packet::Packet;
-use xbricks_protocol::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
-use crate::exports::xbricks::plugins::packet_engine::Guest;
-use crate::xbricks::plugins::logging;
+use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
+//use wabrix_api::hstack::HeaderStack;
+use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
+use wabrix_api::{PluginOpcode, StandardOpcode};
+use wabrix_api::mailbox_api::MailboxBatch;
+use wabrix_api::packet::Packet;
+use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
+use crate::exports::wabrix::plugins::packet_engine::Guest;
+use crate::wabrix::plugins::logging;
 
-use xbricks_protocol::tcp_common::{EngineConfig, SynGenerator, TimeoutStack, run_tcp_state_machine, write_tcp_reply, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_START_RANGE, PORT_END_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED, STAT_TICK_DROP};
+use wabrix_api::tcp_common::{EngineConfig, SynGenerator, TimeoutStack, run_tcp_state_machine, write_tcp_reply, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_START_RANGE, PORT_END_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED, STAT_TICK_DROP};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
-    path: "../../wit/xbricks.wit",
+    path: "../../wit/wabrix.wit",
     world: "engine-plugin",
 });
 
@@ -121,7 +121,7 @@ impl log::Log for HostLogger {
             // Format the message using the alloc crate
             let msg = alloc::format!("tcp_engine: {}", record.args());
             // Call the WIT-generated host function.
-            // The path matches your package: xbricks:plugins/logging
+            // The path matches your package: wabrix:plugins/logging
             logging::log(record.level() as u32, &msg);
         }
     }
@@ -382,9 +382,15 @@ impl Guest for TcpEngine {
                 let mut queue = TIMEOUT_QUEUE.borrow_mut();
 
                 if let Some(pool) = pool_guard.as_mut() {
-                    let timeouts= pool.scavenge_timeouts(current_tsc, timeout_cycles);
-                    log::trace!("process_timers: timeouts.len= {}", timeouts.len());
-                    queue.extend(timeouts);
+                    let available_capacity = queue.available_capacity();
+                    if available_capacity > 0 {
+                        pool.scavenge_timeouts(
+                            current_tsc,
+                            timeout_cycles,
+                            available_capacity,
+                            &mut queue,
+                        );
+                    }
                 }
             }
         }
@@ -588,9 +594,9 @@ fn handle_tcp_packet(
     let action_opt;
     let mut current_state = None;
 
-    // Replace inside handle_tcp_packet (in the Wasm plugin):
-    let mut stats_guard = TCP_STATS.borrow_mut();
     if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
+        // Scope the borrow so it drops immediately after the state machine runs
+        let mut stats_guard = TCP_STATS.borrow_mut();
         action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len, &mut stats_guard);
         current_state = Some(conn.state);
     } else {

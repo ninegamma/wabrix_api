@@ -4,8 +4,8 @@
 
 The project is split into two repositories:
 
-* **xbrix:** Contains the code for the platform of the dataplane engine.
-* **xbricks_public:** Contains the public SDK for creating WASM plugins for the XBRIX platform (includes `xbricks_protocol` crate and `.wit` interface definitions).
+* **wabrix:** Contains the code for the platform of the dataplane engine.
+* **wabrix_api:** Contains the public SDK for creating WASM plugins for the wabrix platform (includes `wabrix_api` crate and `.wit` interface definitions).
 
 These repositories implement a high-performance, software-based networking engine/router. The system processes packets at high throughput (target: 25 Gbps – 100 Gbps) using Linux kernel-bypass via AF_XDP, and features a sandboxed WebAssembly plugin architecture for data-plane programmability.
 
@@ -15,17 +15,17 @@ These repositories implement a high-performance, software-based networking engin
 3. **Strict Memory Safety:** Leverage Rust's type system to guarantee safety across the Native ↔ Wasm boundary.
 
 
-***This file is for the xbricks_public repository, only.***
+***This file is for the wabrix_api repository, only.***
 
 ---
 
 ## 2. Workspace Structure & Module Boundaries
 
-The `xbricks_public` workspace (`Cargo.toml` at the root) contains one library crate and four example plugin crates:
+The `wabrix_api` workspace (`Cargo.toml` at the root) contains one library crate and four example plugin crates:
 
 ```
-xbricks_public/
-├── xbricks_protocol/          # Core SDK library: Packet<'a>, HeaderStack, protocol headers, routing types
+wabrix_api/
+├── wabrix_api/          # Core SDK library: Packet<'a>, HeaderStack, protocol headers, routing types
 ├── plugins/
 │   ├── tcp_engine/            # Example engine plugin: implements the packet-engine WIT interface
 │   ├── icmp_filter/           # Example filter plugin: implements the inspector WIT interface
@@ -39,26 +39,26 @@ xbricks_public/
 
 | Crate | Role | May depend on |
 |---|---|---|
-| `xbricks_protocol` | Core SDK: `Packet<'a>`, `HeaderStack`, protocol header structs, routing result types, `StandardOpcode`; `no_std` compatible | `network-types`, `macaddr`, `byteorder`, `fnv`, `anyhow` |
-| `plugins/tcp_engine` | Example `engine-plugin`: implements `process-batch`, `process-timers`, `on-control-event`, `get-telemetry` | `xbricks_protocol`, `wit-bindgen`, `spin`, `network-types` |
-| `plugins/icmp_filter` | Example `filter-plugin`: implements `inspect-batch` | `xbricks_protocol`, `wit-bindgen` |
-| `plugins/filter_plugin` | Example `filter-plugin`: implements `inspect-batch` | `xbricks_protocol`, `wit-bindgen` |
-| `plugins/generator_plugin` | Example `generator-plugin`: implements `generate-batch` | `xbricks_protocol`, `wit-bindgen`, `network-types`, `macaddr`, `spin` |
+| `wabrix_api` | Core SDK: `Packet<'a>`, `HeaderStack`, protocol header structs, routing result types, `StandardOpcode`; `no_std` compatible | `network-types`, `macaddr`, `byteorder`, `fnv`, `anyhow` |
+| `plugins/tcp_engine` | Example `engine-plugin`: implements `process-batch`, `process-timers`, `on-control-event`, `get-telemetry` | `wabrix_api`, `wit-bindgen`, `spin`, `network-types` |
+| `plugins/icmp_filter` | Example `filter-plugin`: implements `inspect-batch` | `wabrix_api`, `wit-bindgen` |
+| `plugins/filter_plugin` | Example `filter-plugin`: implements `inspect-batch` | `wabrix_api`, `wit-bindgen` |
+| `plugins/generator_plugin` | Example `generator-plugin`: implements `generate-batch` | `wabrix_api`, `wit-bindgen`, `network-types`, `macaddr`, `spin` |
 
-**Dependency direction is strictly one-way:** all plugin crates → `xbricks_protocol`. Never introduce reverse or circular dependencies.
+**Dependency direction is strictly one-way:** all plugin crates → `wabrix_api`. Never introduce reverse or circular dependencies.
 
 ### Key source files
 
 | File | Contains |
 |---|---|
 | `wit/xbricks.wit` | WIT interface definitions: `inspector`, `packet-engine`, `generator`, `logging`; three worlds: `filter-plugin`, `generator-plugin`, `engine-plugin` |
-| `xbricks_protocol/src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations |
-| `xbricks_protocol/src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `Pdu0` + UMEM base address; primary plugin-facing API |
-| `xbricks_protocol/src/hstack.rs` | `HeaderStack` — fixed-capacity (5 slots) parsed header descriptor; exactly 16 bytes |
-| `xbricks_protocol/src/headers/` | Zero-copy header structs: `MacHeader`, `IpHeader`, `TcpHeader`, `UdpHeader`, `IcmpHeader`, `ArpIpv4Header`, `Ipv6Header` |
-| `xbricks_protocol/src/exports.rs` | Visibility gating for `Pdu0` / `HeaderStack`: `pub` when `host` feature enabled, `pub(crate)` otherwise |
-| `xbricks_protocol/src/wpdu_impl.rs` | `Pdu0` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
-| `xbricks_protocol/src/helpers.rs` | Checksum helpers and other protocol utilities |
+| `wabrix_api/src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations |
+| `wabrix_api/src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `Pdu0` + UMEM base address; primary plugin-facing API |
+| `wabrix_api/src/hstack.rs` | `HeaderStack` — fixed-capacity (5 slots) parsed header descriptor; exactly 16 bytes |
+| `wabrix_api/src/headers/` | Zero-copy header structs: `MacHeader`, `IpHeader`, `TcpHeader`, `UdpHeader`, `IcmpHeader`, `ArpIpv4Header`, `Ipv6Header` |
+| `wabrix_api/src/exports.rs` | Visibility gating for `Pdu0` / `HeaderStack`: `pub` when `host` feature enabled, `pub(crate)` otherwise |
+| `wabrix_api/src/wpdu_impl.rs` | `Pdu0` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
+| `wabrix_api/src/helpers.rs` | Checksum helpers and other protocol utilities |
 
 ---
 
@@ -66,8 +66,8 @@ xbricks_public/
 
 ### Language & Compiler
 * **Language:** Rust (Edition 2021).
-* **`no_std`:** `xbricks_protocol` is `#![no_std]` (uses `extern crate alloc`). Never introduce `std`-only dependencies into it.
-* **Linting:** Run `cargo clippy -p xbricks_protocol` (native) and `cargo clippy --target wasm32-wasip2` (WASM plugins). The codebase has a pre-existing warning backlog; `-D warnings` is the goal once that backlog is cleared. Until then, **new code must introduce zero new warnings** on either target. Do not use `#[allow(...)]` without a comment explaining why it is unavoidable.
+* **`no_std`:** `wabrix_api` is `#![no_std]` (uses `extern crate alloc`). Never introduce `std`-only dependencies into it.
+* **Linting:** Run `cargo clippy -p wabrix_api` (native) and `cargo clippy --target wasm32-wasip2` (WASM plugins). The codebase has a pre-existing warning backlog; `-D warnings` is the goal once that backlog is cleared. Until then, **new code must introduce zero new warnings** on either target. Do not use `#[allow(...)]` without a comment explaining why it is unavoidable.
 
 ### Plugin Build Target
 * **Target:** `wasm32-wasip2` (WASI 0.2 / Component Model). All plugin crates are compiled as `crate-type = ["cdylib"]`.
@@ -87,7 +87,7 @@ xbricks_public/
 * `spin` — `no_std`-safe `Mutex`/`Once` for static plugin state.
 * `network-types` — zero-copy Ethernet/IP/UDP/TCP header structs.
 * `macaddr` — MAC address type with no `std` dependency.
-* `anyhow` — error handling in `xbricks_protocol` (cold-path only).
+* `anyhow` — error handling in `wabrix_api` (cold-path only).
 
 ---
 
@@ -117,7 +117,7 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 
 ### D. The `host` Feature Flag
 
-* The `host` feature on `xbricks_protocol` exposes `Pdu0` and `HeaderStack` internals publicly — it is **reserved for the host engine** (`xbrix` repo) only.
+* The `host` feature on `wabrix_api` exposes `Pdu0` and `HeaderStack` internals publicly — it is **reserved for the host engine** (`wabrix` repo) only.
 * **NEVER** enable `host` in a plugin's `Cargo.toml`. Plugins must only use the `Packet<'a>` API surface.
 
 ### E. Unrequested Code Changes
@@ -149,14 +149,14 @@ rustup target add wasm32-wasip2
 # Build all plugins as WASM components
 cargo build --release --target wasm32-wasip2
 
-# Build xbricks_protocol for native (host side, with host internals exposed)
-cargo build --release -p xbricks_protocol --features host
+# Build wabrix_api for native (host side, with host internals exposed)
+cargo build --release -p wabrix_api --features host
 
-# Lint — xbricks_protocol native (default features)
-cargo clippy -p xbricks_protocol
+# Lint — wabrix_api native (default features)
+cargo clippy -p wabrix_api
 
-# Lint — xbricks_protocol with host internals exposed
-cargo clippy -p xbricks_protocol --features host
+# Lint — wabrix_api with host internals exposed
+cargo clippy -p wabrix_api --features host
 
 # Lint — all WASM plugin crates
 cargo clippy --target wasm32-wasip2

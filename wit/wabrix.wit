@@ -1,4 +1,4 @@
-package xbricks:plugins@0.1.0;
+package wabrix:plugins@0.1.0;
 
 /// The interface for nodes that route, drop, or filter existing traffic.
 interface inspector {

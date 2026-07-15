@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
+use crate::tcp_common::TimeoutStack;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TcpState {
@@ -258,34 +259,44 @@ impl ConnectionPool {
         }
     }
 
-    /// O(1) Check the oldest connections. Returns keys that need a FIN sent.
-    pub fn scavenge_timeouts(&mut self, current_tsc: u64, timeout_cycles: u64) -> Vec<FlowKey> {
-        let mut timed_out_keys = Vec::new();
+    /// Scavenges timed out connections and pushes them directly into the provided queue.
+    /// This entirely avoids intermediate heap allocations.
+    pub fn scavenge_timeouts(
+        &mut self,
+        current_tsc: u64,
+        timeout_cycles: u64,
+        limit: usize,
+        output_queue: &mut TimeoutStack,
+    ) {
+        let mut collected = 0;
 
         while self.head != NULL_NODE {
             let oldest_idx = self.head;
             if current_tsc.saturating_sub(self.arena[oldest_idx].last_active_tsc) > timeout_cycles {
-                // It timed out!
                 let key = self.arena[oldest_idx].key;
-
                 let state = self.arena[oldest_idx].state;
+
                 if state == TcpState::Established
                     || state == TcpState::SynReceived
-                    || state == TcpState::FinWait1
+                    || state == TcpState::CloseWait
                 {
+                    // Stop collecting if the limit is reached
+                    // The connection stays at the head of the list with its expired timestamp
+                    // It will be processed immediately on the next cycle
+                    if collected >= limit {
+                        break;
+                    }
+
                     // Let the tick handler own the state transition (polite close or Guillotine).
                     // Bump the timestamp so this connection gets a fresh window before the
                     // next scavenge fires again.
                     self.arena[oldest_idx].last_active_tsc = current_tsc;
-                    timed_out_keys.push(key);
+                    output_queue.push(key);
+                    collected += 1;
 
                     self.unlink(oldest_idx);
                     self.push_tail(oldest_idx);
-                    /*
-                    if timed_out_keys.len() >= limit {
-                        break; // STOP collecting to prevent OOM
-                    }
-                     */
+
                 } else {
                     // Already closed/dead — free the slot directly.
                     self.remove(&key);
@@ -296,7 +307,5 @@ impl ConnectionPool {
                 break;
             }
         }
-
-        timed_out_keys
     }
 }

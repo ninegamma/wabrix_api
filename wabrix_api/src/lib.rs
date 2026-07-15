@@ -95,7 +95,7 @@ impl From<PluginOpcode> for u32 {
 }
 
 /// Shared zero-copy mailbox between host and plugin.
-/// Layout MUST match `xbricks_base::mailbox::BatchMetadata` on the host exactly.
+/// Layout MUST match `wabrix_base::mailbox::BatchMetadata` on the host exactly.
 #[repr(C)]
 pub struct BatchMetadata {
     /// Written by host before calling process-batch: AF_XDP frame descriptor offsets (UMEM-relative)

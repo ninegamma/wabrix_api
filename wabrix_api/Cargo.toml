@@ -1,5 +1,5 @@
 [package]
-name = "xbricks_protocol"
+name = "wabrix_api"
 edition.workspace = true
 version.workspace = true
 
@@ -13,7 +13,7 @@ anyhow = { workspace = true }
 log = "0.4.29"
 hashbrown = "0.17.1"
 [lib]
-name="xbricks_protocol"
+name="wabrix_api"
 path="src/lib.rs"
 
 [features]

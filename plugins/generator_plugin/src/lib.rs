@@ -7,15 +7,15 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use macaddr::MacAddr6;
 use core::net::Ipv4Addr;
 use spin::Mutex; // <-- idiomatic no_std lock
-use xbricks_protocol::headers::{IpHeader, MacHeader, TcpHeader};
-use crate::exports::xbricks::plugins::generator::Guest;
+use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
+use crate::exports::wabrix::plugins::generator::Guest;
 use network_types::eth::EtherType;
-use xbricks_protocol::helpers::{parse_ip, parse_mac};
-use xbricks_protocol::packet::PacketBatch;
+use wabrix_api::helpers::{parse_ip, parse_mac};
+use wabrix_api::packet::PacketBatch;
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
-    path: "../../wit/xbricks.wit",
+    path: "../../wit/wabrix.wit",
     world: "generator-plugin",
 });
 

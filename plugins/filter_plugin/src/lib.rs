@@ -3,13 +3,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::slice;
-use xbricks_protocol::headers::HeaderKind;
-use xbricks_protocol::packet::PacketBatch;
-use crate::exports::xbricks::plugins::inspector::{Guest};
+use wabrix_api::headers::HeaderKind;
+use wabrix_api::packet::PacketBatch;
+use crate::exports::wabrix::plugins::inspector::{Guest};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
-    path: "../../wit/xbricks.wit",
+    path: "../../wit/wabrix.wit",
     world: "filter-plugin",
 });
 

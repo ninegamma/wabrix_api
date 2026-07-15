@@ -2,12 +2,12 @@
 extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use xbricks_protocol::packet::PacketBatch;
-use crate::exports::xbricks::plugins::inspector::Guest;
+use wabrix_api::packet::PacketBatch;
+use crate::exports::wabrix::plugins::inspector::Guest;
 
 // Point this to the EXACT SAME .wit file you used for your first plugin!
 wit_bindgen::generate!({
-    path: "../../wit/xbricks.wit",
+    path: "../../wit/wabrix.wit",
     world: "filter-plugin",
 });
 
