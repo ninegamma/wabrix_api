@@ -341,7 +341,7 @@ impl Guest for TcpEngine {
                 }
                 (a, l)
             } else {
-                packet.parse_fast();
+                //packet.parse_fast();  // is already done within the DAG by FastParser Node
                 if packet.fingerprint() == Packet::TCP_OVER_IPV4 {
                     let mut p = packet.as_packet();
                     handle_tcp_packet(&mut p, pool, &local_config)
