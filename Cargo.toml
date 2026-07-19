@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "wabrix_api",
     "plugins/tcp_engine",
-    "plugins/icmp_filter",
     "plugins/filter_plugin",
     "plugins/generator_plugin",
 ]
