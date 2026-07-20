@@ -2,14 +2,14 @@
 #![no_std]
 extern crate alloc;
 
+use crate::exports::wabrix::plugins::generator::Guest;
 use alloc::vec::Vec;
+use core::net::Ipv4Addr;
 use core::sync::atomic::{AtomicU32, Ordering};
 use macaddr::MacAddr6;
-use core::net::Ipv4Addr;
+use network_types::eth::EtherType;
 use spin::Mutex; // <-- idiomatic no_std lock
 use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
-use crate::exports::wabrix::plugins::generator::Guest;
-use network_types::eth::EtherType;
 use wabrix_api::helpers::{parse_ip, parse_mac};
 use wabrix_api::packet::PacketBatch;
 
@@ -88,10 +88,7 @@ impl Guest for MyGenerator {
         SEQ_COUNTER.store(0, Ordering::Relaxed);
     }
 
-    fn set_dst(
-        mac: (u8, u8, u8, u8, u8, u8),
-        ip: (u8, u8, u8, u8),
-    ) {
+    fn set_dst(mac: (u8, u8, u8, u8, u8, u8), ip: (u8, u8, u8, u8)) {
         // Reconstruct into native arrays
         let ip_bytes: [u8; 4] = [ip.0, ip.1, ip.2, ip.3];
         let mac_bytes: [u8; 6] = [mac.0, mac.1, mac.2, mac.3, mac.4, mac.5];
@@ -119,47 +116,50 @@ impl Guest for MyGenerator {
         let dst_ip = Ipv4Addr::from(config.dst_ip.unwrap_or([192, 168, 177, 222]));
         let base_src_ip = config.src_ip.unwrap_or([192, 168, 177, 2]);
 
-        let lengths: Vec<u32> = batch.iter_mut().map(|mut packet| {
-            // 1. Calculate dynamic fields per-packet
-            let src_ip_u32 = if let Some(seed) = config.rng_seed {
-                let new_seed = fast_rand(seed);
-                config.rng_seed = Some(new_seed);
-                new_seed
-            } else {
-                u32::from_be_bytes(base_src_ip)
-            };
+        let lengths: Vec<u32> = batch
+            .iter_mut()
+            .map(|mut packet| {
+                // 1. Calculate dynamic fields per-packet
+                let src_ip_u32 = if let Some(seed) = config.rng_seed {
+                    let new_seed = fast_rand(seed);
+                    config.rng_seed = Some(new_seed);
+                    new_seed
+                } else {
+                    u32::from_be_bytes(base_src_ip)
+                };
 
-            // 2. Build MacHeader
-            let mut mac = MacHeader::new();
-            mac.src = src_mac;
-            mac.dst = dst_mac;
-            mac.set_ethertype(EtherType::Ipv4);
+                // 2. Build MacHeader
+                let mut mac = MacHeader::new();
+                mac.src = src_mac;
+                mac.dst = dst_mac;
+                mac.set_ethertype(EtherType::Ipv4);
 
-            // 3. Build IpHeader
-            let mut ip = IpHeader::new();
-            ip.set_src(src_ip_u32);
-            ip.set_dst_address(dst_ip);
-            ip.set_ttl(128);
-            ip.set_version(4);
-            ip.set_protocol(6); // TCP
-            ip.set_ihl(5);
-            ip.set_length(40);
-            ip.set_flags(0x2); // DF=1
+                // 3. Build IpHeader
+                let mut ip = IpHeader::new();
+                ip.set_src(src_ip_u32);
+                ip.set_dst_address(dst_ip);
+                ip.set_ttl(128);
+                ip.set_version(4);
+                ip.set_protocol(6); // TCP
+                ip.set_ihl(5);
+                ip.set_length(40);
+                ip.set_flags(0x2); // DF=1
 
-            // 4. Build TcpHeader
-            let mut tcp = TcpHeader::new();
-            tcp.set_syn_flag();
-            tcp.set_src_port(111);
-            tcp.set_dst_port(worker_id);
-            tcp.set_data_offset(5);
-            tcp.set_seq_num(seq);
+                // 4. Build TcpHeader
+                let mut tcp = TcpHeader::new();
+                tcp.set_syn_flag();
+                tcp.set_src_port(111);
+                tcp.set_dst_port(worker_id);
+                tcp.set_data_offset(5);
+                tcp.set_seq_num(seq);
 
-            // 5. Serialize directly into Wasm memory
-            let len = packet.write_tcp_ipv4_headers(&mac, &ip, &tcp);
+                // 5. Serialize directly into Wasm memory
+                let len = packet.write_tcp_ipv4_headers(&mac, &ip, &tcp);
 
-            seq = seq.wrapping_add(1);
-            len
-        }).collect();
+                seq = seq.wrapping_add(1);
+                len
+            })
+            .collect();
 
         // Save state
         SEQ_COUNTER.store(seq, Ordering::Relaxed);

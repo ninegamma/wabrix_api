@@ -10,6 +10,8 @@ pub use self::tcp::*;
 pub use self::udp::*;
 
 mod arp;
+pub mod check;
+pub mod flow;
 mod icmp;
 mod ip;
 mod ipv6;
@@ -17,8 +19,6 @@ mod mac;
 mod null_header;
 mod tcp;
 mod udp;
-pub mod flow;
-pub mod check;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

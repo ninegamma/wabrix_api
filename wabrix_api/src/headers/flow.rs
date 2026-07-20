@@ -1,10 +1,10 @@
 use byteorder::{BigEndian, ByteOrder};
-use fnv::FnvHasher;
 use core::fmt;
 use core::hash::Hasher;
 use core::mem;
 use core::net::{Ipv4Addr, SocketAddrV4};
 use core::slice;
+use fnv::FnvHasher;
 
 // TODO: Currently just deriving Hash, but figure out if this is a performance problem. By default, Rust uses SipHash
 // which is supposed to have reasonable performance characteristics.

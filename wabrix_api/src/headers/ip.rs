@@ -1,12 +1,12 @@
-use crate::headers::{EndOffset, HeaderKind};
+use crate::headers::check::checksum;
 use crate::headers::flow::FiveTupleV4;
+use crate::headers::{EndOffset, HeaderKind};
 use byteorder::{BigEndian, ByteOrder};
 use core::convert::From;
 use core::default::Default;
 use core::fmt;
 use core::net::Ipv4Addr;
 use core::slice;
-use crate::headers::check::checksum;
 
 /// IP header using SSE
 #[derive(Clone, Copy, Debug, Default)]
@@ -186,7 +186,8 @@ impl IpHeader {
 
     #[inline]
     pub fn set_flags(&mut self, flags: u8) {
-        self.id_to_foffset = (self.id_to_foffset & !0x00e00000) | (((flags & 0x7) as u32) << (16 + 5));
+        self.id_to_foffset =
+            (self.id_to_foffset & !0x00e00000) | (((flags & 0x7) as u32) << (16 + 5));
     }
 
     #[inline]
@@ -250,7 +251,8 @@ impl IpHeader {
 
     #[inline]
     pub fn set_length(&mut self, len: u16) {
-        self.version_to_len = (self.version_to_len & !0xffff0000) | ((u16::to_be(len) as u32) << 16);
+        self.version_to_len =
+            (self.version_to_len & !0xffff0000) | ((u16::to_be(len) as u32) << 16);
     }
 
     #[inline]
@@ -265,7 +267,10 @@ impl IpHeader {
         // reading `size_of::<IpHeader>()` bytes is sound because all bit patterns are valid
         // for a byte slice view. The slice does not outlive `self`.
         unsafe {
-            let bytes = slice::from_raw_parts((self as *const IpHeader) as *const u8, size_of::<IpHeader>());
+            let bytes = slice::from_raw_parts(
+                (self as *const IpHeader) as *const u8,
+                size_of::<IpHeader>(),
+            );
             self.set_csum(checksum(bytes, 5));
         };
     }

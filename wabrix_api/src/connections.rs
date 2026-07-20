@@ -1,7 +1,7 @@
+use crate::tcp_common::TimeoutStack;
 use alloc::string::String;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
-use crate::tcp_common::TimeoutStack;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TcpState {
@@ -40,26 +40,25 @@ pub struct ConnectionNode {
     // 4-BYTE ALIGNED FIELDS
     // -----------------------------------------
     // Assuming FlowKey is (usize, usize, u16, u16) = 12 bytes
-    pub key: FlowKey,         // 12 bytes
-    pub snd_nxt: u32,         // 4 bytes
-    pub rcv_nxt: u32,         // 4 bytes
+    pub key: FlowKey, // 12 bytes
+    pub snd_nxt: u32, // 4 bytes
+    pub rcv_nxt: u32, // 4 bytes
 
     // Replaced Option<usize> (8 bytes each) with usize (4 bytes each)
-    pub prev: usize,            // 4 bytes
-    pub next: usize,            // 4 bytes
+    pub prev: usize, // 4 bytes
+    pub next: usize, // 4 bytes
 
     // -----------------------------------------
     // 1-BYTE ALIGNED FIELDS
     // -----------------------------------------
-    pub state: TcpState,      // 1 byte
+    pub state: TcpState, // 1 byte
 
-    // -----------------------------------------
-    // RUST COMPILER INJECTS 3 BYTES OF PADDING HERE
-    // TO MAKE THE TOTAL STRUCT ALIGN TO 8 BYTES
-    // -----------------------------------------
-    // TOTAL: 40 Bytes
+                         // -----------------------------------------
+                         // RUST COMPILER INJECTS 3 BYTES OF PADDING HERE
+                         // TO MAKE THE TOTAL STRUCT ALIGN TO 8 BYTES
+                         // -----------------------------------------
+                         // TOTAL: 40 Bytes
 }
-
 
 // - Removed alloc crate dependencies
 // - Rely strictly on core primitives
@@ -67,9 +66,9 @@ pub struct ConnectionNode {
 const HASH_TABLE_SIZE: usize = 1_048_576; // - Must be a power of two for fast masking
 
 // - Sentinel values
-pub const NULL_NODE:  usize = usize::MAX;       // arena free-list / linked-list sentinel
-pub const EMPTY_SLOT: usize = usize::MAX;       // hash table: slot was never occupied — stops linear probe
-pub const TOMBSTONE:  usize = usize::MAX - 1;   // hash table: slot was deleted — probe must continue
+pub const NULL_NODE: usize = usize::MAX; // arena free-list / linked-list sentinel
+pub const EMPTY_SLOT: usize = usize::MAX; // hash table: slot was never occupied — stops linear probe
+pub const TOMBSTONE: usize = usize::MAX - 1; // hash table: slot was deleted — probe must continue
 
 pub struct ConnectionPool {
     tcp_node_name: String,
@@ -177,10 +176,20 @@ impl ConnectionPool {
     }
 
     /// O(1) Insert a brand new connection or update an existing one
-    pub fn insert(&mut self, key: FlowKey, state: TcpState, snd_nxt: u32, rcv_nxt: u32, tsc: u64) -> bool {
+    pub fn insert(
+        &mut self,
+        key: FlowKey,
+        state: TcpState,
+        snd_nxt: u32,
+        rcv_nxt: u32,
+        tsc: u64,
+    ) -> bool {
         // FAST PATH: Overwrite existing duplicate connection
         if let Some(&existing_idx) = self.map.get(&key) {
-            log::warn!("HashMap already contains connection key: {:?}. Overwriting.", key);
+            log::warn!(
+                "HashMap already contains connection key: {:?}. Overwriting.",
+                key
+            );
 
             // Update the existing node's state
             self.arena[existing_idx].state = state;
@@ -199,7 +208,15 @@ impl ConnectionPool {
             let free_idx = self.free_head;
             // Reuse an empty slot
             self.free_head = self.arena[free_idx].next;
-            self.arena[free_idx] = ConnectionNode { key, state, snd_nxt, rcv_nxt, last_active_tsc: tsc, prev: NULL_NODE, next: NULL_NODE };
+            self.arena[free_idx] = ConnectionNode {
+                key,
+                state,
+                snd_nxt,
+                rcv_nxt,
+                last_active_tsc: tsc,
+                prev: NULL_NODE,
+                next: NULL_NODE,
+            };
             free_idx
         } else {
             // SAFETY VALVE: Prevent Wasm OOM by stopping vector reallocation
@@ -212,7 +229,15 @@ impl ConnectionPool {
             }
             // Allocate a new slot
             let new_idx = self.arena.len();
-            self.arena.push(ConnectionNode { key, state, snd_nxt, rcv_nxt, last_active_tsc: tsc, prev: NULL_NODE, next: NULL_NODE });
+            self.arena.push(ConnectionNode {
+                key,
+                state,
+                snd_nxt,
+                rcv_nxt,
+                last_active_tsc: tsc,
+                prev: NULL_NODE,
+                next: NULL_NODE,
+            });
 
             // Continuously track the peak allocation of the arena
             self.watermark = self.arena.len();
@@ -236,7 +261,11 @@ impl ConnectionPool {
     }
 
     /// O(log N) Get a connection and instantly move it to the tail
-    pub fn get_mut_and_touch(&mut self, key: &FlowKey, current_tsc: u64) -> Option<&mut ConnectionNode> {
+    pub fn get_mut_and_touch(
+        &mut self,
+        key: &FlowKey,
+        current_tsc: u64,
+    ) -> Option<&mut ConnectionNode> {
         if let Some(&index) = self.map.get(key) {
             self.unlink(index);
             self.push_tail(index);
@@ -296,7 +325,6 @@ impl ConnectionPool {
 
                     self.unlink(oldest_idx);
                     self.push_tail(oldest_idx);
-
                 } else {
                     // Already closed/dead — free the slot directly.
                     self.remove(&key);

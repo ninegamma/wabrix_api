@@ -151,8 +151,8 @@ impl TcpHeader {
         self.flags
     }
 
-    pub fn set_flags(&mut self, flags:u8 ) {
-        self.flags= flags
+    pub fn set_flags(&mut self, flags: u8) {
+        self.flags = flags
     }
 
     // This is weird in being located outside the flags byte.
@@ -374,7 +374,11 @@ impl TcpHeader {
 
     #[inline]
     pub fn update_checksum_incremental(&mut self, old_word: u16, new_word: u16) {
-        self.csum = u16::to_be(update_checksum_incremental(u16::from_be(self.csum), old_word, new_word));
+        self.csum = u16::to_be(update_checksum_incremental(
+            u16::from_be(self.csum),
+            old_word,
+            new_word,
+        ));
     }
 
     /// Urgent pointer

@@ -1,6 +1,6 @@
-use macaddr::MacAddr6 as MacAddress;
 use core::fmt;
 use core::net::Ipv4Addr;
+use macaddr::MacAddr6 as MacAddress;
 
 use super::{EndOffset, HeaderKind};
 

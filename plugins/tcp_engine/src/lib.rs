@@ -4,23 +4,28 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::ptr;
 use core::cell::{Cell, RefCell};
+use core::ptr;
 
-use network_types::eth::EtherType;
 use macaddr::MacAddr6;
+use network_types::eth::EtherType;
 
 use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
 //use wabrix_api::hstack::HeaderStack;
-use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
-use wabrix_api::{PluginOpcode, StandardOpcode};
-use wabrix_api::mailbox_api::MailboxBatch;
-use wabrix_api::packet::Packet;
-use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
 use crate::exports::wabrix::plugins::packet_engine::Guest;
 use crate::wabrix::plugins::logging;
+use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
+use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
+use wabrix_api::mailbox_api::MailboxBatch;
+use wabrix_api::packet::Packet;
+use wabrix_api::{PluginOpcode, StandardOpcode};
 
-use wabrix_api::tcp_common::{EngineConfig, SynGenerator, TimeoutStack, run_tcp_state_machine, write_tcp_reply, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_START_RANGE, PORT_END_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TO_LINUX, STAT_UNEXPECTED, STAT_TICK_DROP};
+use wabrix_api::tcp_common::{
+    run_tcp_state_machine, write_tcp_reply, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
+    FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
+    STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
+    STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
+};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
@@ -63,7 +68,10 @@ impl<T> WasmValue<T> {
     pub const fn new(value: T) -> Self {
         Self(Cell::new(value))
     }
-    pub fn get(&self) -> T where T: Copy {
+    pub fn get(&self) -> T
+    where
+        T: Copy,
+    {
         self.0.get()
     }
     pub fn set(&self, val: T) {
@@ -71,11 +79,7 @@ impl<T> WasmValue<T> {
     }
 }
 
-
-const MAX_TIMEOUTS: usize = 131072;  // 128k timeouts
-
-
-
+const MAX_TIMEOUTS: usize = 131072; // 128k timeouts
 
 static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
@@ -98,7 +102,6 @@ const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
 
-
 // The zero-cost global counter array
 static TCP_STATS: WasmCell<[u64; STAT_COUNT]> = WasmCell::new([0; STAT_COUNT]);
 
@@ -106,7 +109,7 @@ static TCP_STATS: WasmCell<[u64; STAT_COUNT]> = WasmCell::new([0; STAT_COUNT]);
 macro_rules! inc_stat {
     ($stat:expr) => {
         TCP_STATS.borrow_mut()[$stat] += 1
-    }
+    };
 }
 
 struct HostLogger;
@@ -138,7 +141,6 @@ pub fn init_logging() {
     log::set_max_level(log::LevelFilter::Info); // Set your desired Wasm log level
 }
 
-
 const MAX_CONNECTIONS: usize = 524_288;
 
 fn init_state_machine(tcp_node_name: String) {
@@ -146,7 +148,6 @@ fn init_state_machine(tcp_node_name: String) {
     // but it will NEVER trigger a resize or memory.grow during execution.
     *CONNECTIONS.borrow_mut() = Some(ConnectionPool::new(MAX_CONNECTIONS, tcp_node_name));
 }
-
 
 struct TcpEngine;
 
@@ -188,7 +189,9 @@ impl Guest for TcpEngine {
         }
 
         // Resolve node name using fallback chain
-        let node_name = config.name.clone()
+        let node_name = config
+            .name
+            .clone()
             .or(raw_src_ip)
             .unwrap_or_else(|| alloc::string::String::from("unknown"));
 
@@ -199,7 +202,11 @@ impl Guest for TcpEngine {
     }
 
     fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
-        log::trace!("process_batch: batch_size={}, partition_offset={}", batch_size, partition_offset);
+        log::trace!(
+            "process_batch: batch_size={}, partition_offset={}",
+            batch_size,
+            partition_offset
+        );
         let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
         let local_config = CONFIG.borrow().clone().unwrap_or_default();
         let mut processed_count = 0;
@@ -245,13 +252,17 @@ impl Guest for TcpEngine {
                 };
 
                 if let Some(flow_key) = pending_timeout {
-                    log::trace!("process_batch: processing timeout for flow_key {:?}", flow_key);
+                    log::trace!(
+                        "process_batch: processing timeout for flow_key {:?}",
+                        flow_key
+                    );
                     let current_tsc = CURRENT_TSC.get();
-                    let (snd_nxt, rcv_nxt, state, exists) = if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
-                        (conn.snd_nxt, conn.rcv_nxt, conn.state, true)
-                    } else {
-                        (0, 0, TcpState::Closed, false)
-                    };
+                    let (snd_nxt, rcv_nxt, state, exists) =
+                        if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
+                            (conn.snd_nxt, conn.rcv_nxt, conn.state, true)
+                        } else {
+                            (0, 0, TcpState::Closed, false)
+                        };
 
                     if exists {
                         let data_ptr = packet.data_ptr_mut();
@@ -264,9 +275,16 @@ impl Guest for TcpEngine {
                                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                             }
                             l = write_tcp_reply(
-                                data_ptr, reply_src_mac, reply_dst_mac,
-                                flow_key.2, flow_key.3, flow_key.0, flow_key.1,
-                                snd_nxt, rcv_nxt, FLAG_FIN | FLAG_ACK
+                                data_ptr,
+                                reply_src_mac,
+                                reply_dst_mac,
+                                flow_key.2,
+                                flow_key.3,
+                                flow_key.0,
+                                flow_key.1,
+                                snd_nxt,
+                                rcv_nxt,
+                                FLAG_FIN | FLAG_ACK,
                             );
                             inc_stat!(STAT_SENT_FIN);
                             a = ROUTE_TX;
@@ -275,9 +293,16 @@ impl Guest for TcpEngine {
                             pool.remove(&flow_key);
                             inc_stat!(STAT_SENT_RST);
                             l = write_tcp_reply(
-                                data_ptr, reply_src_mac, reply_dst_mac,
-                                flow_key.2, flow_key.3, flow_key.0, flow_key.1,
-                                snd_nxt, rcv_nxt, FLAG_RST | FLAG_ACK
+                                data_ptr,
+                                reply_src_mac,
+                                reply_dst_mac,
+                                flow_key.2,
+                                flow_key.3,
+                                flow_key.0,
+                                flow_key.1,
+                                snd_nxt,
+                                rcv_nxt,
+                                FLAG_RST | FLAG_ACK,
                             );
                             a = ROUTE_TX;
                             generated_reply = true;
@@ -291,18 +316,23 @@ impl Guest for TcpEngine {
                     let syn_rate = local_config.syn_rate.unwrap_or(0);
                     if syn_rate > 0 {
                         let mut gen = SYN_GEN.borrow_mut();
-                        let allowed_to_send = gen.activated && match local_config.syn_limit {
-                            Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
-                            None => true,
-                        };
+                        let allowed_to_send = gen.activated
+                            && match local_config.syn_limit {
+                                Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
+                                None => true,
+                            };
 
                         if allowed_to_send {
                             gen.syns_sent += 1;
-                            gen.prng_state = gen.prng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+                            gen.prng_state = gen
+                                .prng_state
+                                .wrapping_mul(1664525)
+                                .wrapping_add(1013904223);
                             let isn = gen.prng_state;
 
                             let src_port = gen.port_counter;
-                            let base_ip = u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
+                            let base_ip =
+                                u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
                             let our_ip = base_ip.wrapping_add(gen.ip_offset);
 
                             if gen.port_counter >= PORT_END_RANGE {
@@ -313,18 +343,32 @@ impl Guest for TcpEngine {
                             }
 
                             let dst_port = 80;
-                            let their_ip = u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
+                            let their_ip =
+                                u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
                             let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
-                            pool.insert(flow_key, TcpState::SynSent, isn.wrapping_add(1), 0, CURRENT_TSC.get());
+                            pool.insert(
+                                flow_key,
+                                TcpState::SynSent,
+                                isn.wrapping_add(1),
+                                0,
+                                CURRENT_TSC.get(),
+                            );
 
                             let data_ptr = packet.data_ptr_mut();
                             let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                             let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
                             l = write_tcp_reply(
-                                data_ptr, reply_src_mac, reply_dst_mac,
-                                our_ip, src_port, their_ip, dst_port,
-                                isn, 0, FLAG_SYN
+                                data_ptr,
+                                reply_src_mac,
+                                reply_dst_mac,
+                                our_ip,
+                                src_port,
+                                their_ip,
+                                dst_port,
+                                isn,
+                                0,
+                                FLAG_SYN,
                             );
                             inc_stat!(STAT_SENT_SYN);
                             a = ROUTE_TX;
@@ -353,7 +397,10 @@ impl Guest for TcpEngine {
             packet.set_action(action);
             processed_count += 1;
         }
-        log::trace!("process_batch: Finished successfully with {} packets", processed_count);
+        log::trace!(
+            "process_batch: Finished successfully with {} packets",
+            processed_count
+        );
         processed_count
     }
 
@@ -365,18 +412,19 @@ impl Guest for TcpEngine {
         let tsc_freq = config.tsc_frequency;
         let mut frames_to_request = 0;
 
-        if tsc_freq == 0 { return 0; }
+        if tsc_freq == 0 {
+            return 0;
+        }
 
         // =================================================================
         // 1. TIMEOUT SCAVENGER
         // =================================================================
         if let Some(timeout_millis) = config.close_timeout_millis {
-            let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128)/1000) as u64;
+            let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128) / 1000) as u64;
             let last_scan = LAST_TIMEOUT_SCAN.get();
 
             // Run the table scan only once every 10ms to save CPU
             if current_tsc.saturating_sub(last_scan) > (tsc_freq / 100) {
-
                 LAST_TIMEOUT_SCAN.set(current_tsc);
                 let mut pool_guard = CONNECTIONS.borrow_mut();
                 let mut queue = TIMEOUT_QUEUE.borrow_mut();
@@ -403,13 +451,16 @@ impl Guest for TcpEngine {
         if syn_rate > 0 {
             let mut gen = SYN_GEN.borrow_mut();
 
-            let allowed_to_send = gen.activated && match config.syn_limit {
-                Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
-                None => true,
-            };
+            let allowed_to_send = gen.activated
+                && match config.syn_limit {
+                    Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
+                    None => true,
+                };
 
             if allowed_to_send {
-                if gen.last_tsc == 0 { gen.last_tsc = current_tsc; }
+                if gen.last_tsc == 0 {
+                    gen.last_tsc = current_tsc;
+                }
                 let delta_tsc = current_tsc.saturating_sub(gen.last_tsc);
                 gen.last_tsc = current_tsc;
 
@@ -424,7 +475,12 @@ impl Guest for TcpEngine {
                 }
                 gen.cycle_accumulator %= tsc_freq as u128;
 
-                log::trace!("process_timers: syn_frames= {}, gen.syns_sent= {}, max_syns= {:?}", syn_frames, gen.syns_sent, config.syn_limit);
+                log::trace!(
+                    "process_timers: syn_frames= {}, gen.syns_sent= {}, max_syns= {:?}",
+                    syn_frames,
+                    gen.syns_sent,
+                    config.syn_limit
+                );
                 frames_to_request += syn_frames;
             }
         }
@@ -476,7 +532,7 @@ impl Guest for TcpEngine {
     }
 
     fn get_telemetry() -> Vec<u64> {
-        let mut stats= TCP_STATS.borrow().to_vec();
+        let mut stats = TCP_STATS.borrow().to_vec();
         // Add current pool usage to stats
         if let Some(pool) = CONNECTIONS.borrow().as_ref() {
             stats.push(pool.watermark as u64); // Current active/reused nodes
@@ -516,7 +572,6 @@ fn set_state(state: u8) {
 }
 
 fn flush_state(mode: u8) {
-
     // This stops the generator and prevents a new run from starting automatically.
     set_state(0);
 
@@ -580,7 +635,10 @@ fn handle_tcp_packet(
     let src_port = tcp_hdr.src_port();
     let dst_port = tcp_hdr.dst_port();
     let flow_key = FlowKey(src_ip, src_port, dst_ip, dst_port);
-    log::trace!("handle_tcp_packet: processing packet with flow_key {:?}", flow_key);
+    log::trace!(
+        "handle_tcp_packet: processing packet with flow_key {:?}",
+        flow_key
+    );
 
     let tcp_flags = tcp_hdr.flags();
     let seq_num = tcp_hdr.seq_num();
@@ -597,7 +655,14 @@ fn handle_tcp_packet(
     if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
         // Scope the borrow so it drops immediately after the state machine runs
         let mut stats_guard = TCP_STATS.borrow_mut();
-        action_opt = run_tcp_state_machine(conn, tcp_flags, seq_num, ack_num, payload_len, &mut stats_guard);
+        action_opt = run_tcp_state_machine(
+            conn,
+            tcp_flags,
+            seq_num,
+            ack_num,
+            payload_len,
+            &mut stats_guard,
+        );
         current_state = Some(conn.state);
     } else {
         if tcp_flags & FLAG_RST != 0 {
@@ -608,30 +673,45 @@ fn handle_tcp_packet(
         if tcp_flags & FLAG_ACK != 0 {
             inc_stat!(STAT_UNEXPECTED);
             let reply_seq = ack_num;
-            let reply_ack = seq_num.wrapping_add(payload_len).wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
+            let reply_ack = seq_num
+                .wrapping_add(payload_len)
+                .wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
 
             inc_stat!(STAT_SENT_RST);
             action_opt = Some((FLAG_RST | FLAG_ACK, reply_seq, reply_ack));
-        }
-        else if tcp_flags & FLAG_SYN != 0 {
+        } else if tcp_flags & FLAG_SYN != 0 {
             inc_stat!(STAT_RECV_SYN);
             let rcv_nxt = seq_num.wrapping_add(1);
             let initial_snd_nxt = 1000u32;
-            pool.insert(flow_key, TcpState::SynReceived, initial_snd_nxt.wrapping_add(1), rcv_nxt, current_tsc);
+            pool.insert(
+                flow_key,
+                TcpState::SynReceived,
+                initial_snd_nxt.wrapping_add(1),
+                rcv_nxt,
+                current_tsc,
+            );
 
             inc_stat!(STAT_SENT_SYNACK);
             action_opt = Some((FLAG_SYN | FLAG_ACK, initial_snd_nxt, rcv_nxt));
         } else {
             inc_stat!(STAT_UNEXPECTED);
-            let reply_seq = if tcp_flags & FLAG_ACK != 0 { ack_num } else { 0 };
-            let reply_ack = seq_num.wrapping_add(payload_len).wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
+            let reply_seq = if tcp_flags & FLAG_ACK != 0 {
+                ack_num
+            } else {
+                0
+            };
+            let reply_ack = seq_num
+                .wrapping_add(payload_len)
+                .wrapping_add(if tcp_flags & FLAG_FIN != 0 { 1 } else { 0 });
 
             inc_stat!(STAT_SENT_RST);
             action_opt = Some((FLAG_RST | FLAG_ACK, reply_seq, reply_ack));
         }
     }
 
-    if current_state == Some(TcpState::Closed) { pool.remove(&flow_key); }
+    if current_state == Some(TcpState::Closed) {
+        pool.remove(&flow_key);
+    }
 
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
         let data_ptr = packet.data_ptr_mut();
@@ -639,16 +719,22 @@ fn handle_tcp_packet(
         let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
 
         let len = write_tcp_reply(
-            data_ptr, reply_src_mac, reply_dst_mac,
-            dst_ip, dst_port, src_ip, src_port,
-            reply_seq, reply_ack, reply_flags
+            data_ptr,
+            reply_src_mac,
+            reply_dst_mac,
+            dst_ip,
+            dst_port,
+            src_ip,
+            src_port,
+            reply_seq,
+            reply_ack,
+            reply_flags,
         );
         return (ROUTE_TX, len);
     }
 
     (ROUTE_DROP, 0)
 }
-
 
 // Export the implementation to the runtime
 export!(TcpEngine);

@@ -1,12 +1,16 @@
+use crate::exports::WPdu;
+use crate::headers::check::ipv4_checksum;
+use crate::headers::{EndOffset, TcpHeader};
 use anyhow::anyhow;
 use log::trace;
-use crate::headers::{EndOffset, TcpHeader};
-use crate::headers::check::ipv4_checksum;
-use crate::exports::WPdu;
-
 
 #[inline]
-pub fn update_tcp_checksum(tcp_header: &mut TcpHeader, ip_payload_size: usize, ip_src: u32, ip_dst: u32) {
+pub fn update_tcp_checksum(
+    tcp_header: &mut TcpHeader,
+    ip_payload_size: usize,
+    ip_src: u32,
+    ip_dst: u32,
+) {
     let chk;
     {
         chk = ipv4_checksum(
@@ -21,8 +25,6 @@ pub fn update_tcp_checksum(tcp_header: &mut TcpHeader, ip_payload_size: usize, i
     }
     tcp_header.set_checksum(chk);
 }
-
-
 
 #[inline]
 pub fn prepare_checksums_and_ttl(p: &mut WPdu, base_addr: usize) {
@@ -42,7 +44,11 @@ pub fn prepare_checksums_and_ttl(p: &mut WPdu, base_addr: usize) {
         dst = ip.dst();
     }
     update_tcp_checksum(stack.tcp_mut(base_addr, 2), psz, src, dst);
-    trace!("ip-payload_sz= {}, checksum recalc = {:X}", psz, stack.tcp_mut(base_addr, 2).checksum());
+    trace!(
+        "ip-payload_sz= {}, checksum recalc = {:X}",
+        psz,
+        stack.tcp_mut(base_addr, 2).checksum()
+    );
 }
 
 pub fn parse_suffixed_number(pps_str: &str) -> anyhow::Result<u64> {
@@ -82,7 +88,6 @@ pub fn parse_suffixed_number(pps_str: &str) -> anyhow::Result<u64> {
     // 5. Convert to u64
     Ok((base_val * multiplier) as u64)
 }
-
 
 // #![no_std] Safe Parsers
 // =====================================================================

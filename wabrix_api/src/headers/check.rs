@@ -123,7 +123,11 @@ pub fn ipv4_checksum(
 
 // everything in host byte order:
 #[inline]
-pub fn update_checksum_incremental(old_check: u16, old_data_csum: u16, new_data_csum: u16) -> u16be {
+pub fn update_checksum_incremental(
+    old_check: u16,
+    old_data_csum: u16,
+    new_data_csum: u16,
+) -> u16be {
     let tmp: u32;
     tmp = (!old_check) as u32 + (!old_data_csum) as u32 + new_data_csum as u32;
     finalize_checksum(tmp)

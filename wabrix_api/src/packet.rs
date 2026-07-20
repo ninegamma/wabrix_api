@@ -1,8 +1,9 @@
-
-use core::slice;
-use crate::hstack::HeaderStack;
-use crate::headers::{ArpIpv4Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader};
 use crate::exports::Pdu0;
+use crate::headers::{
+    ArpIpv4Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader,
+};
+use crate::hstack::HeaderStack;
+use core::slice;
 
 /// The safe, high-level interface for a single packet.
 pub struct Packet<'a> {
@@ -11,12 +12,9 @@ pub struct Packet<'a> {
 }
 
 impl<'a> Packet<'a> {
-    
     /// if headers().fingerprint() == TCP_OVER_IPV4 { ... }
-    pub const TCP_OVER_IPV4: u32 = (HeaderKind::Mac as u32) |
-        ((HeaderKind::Ip as u32) << 4) |
-        ((HeaderKind::Tcp as u32) << 8);
-
+    pub const TCP_OVER_IPV4: u32 =
+        (HeaderKind::Mac as u32) | ((HeaderKind::Ip as u32) << 4) | ((HeaderKind::Tcp as u32) << 8);
 
     /// Internal constructor.
     #[inline(always)]
@@ -53,7 +51,6 @@ impl<'a> Packet<'a> {
     pub fn headers(&self) -> &HeaderStack {
         &self.pdu.header_stack
     }
-
 
     /// Pushes a new header. Returns Result to allow graceful error handling.
     pub fn push_header<T: Copy>(&mut self, header: &T) -> anyhow::Result<&mut Self> {
@@ -317,7 +314,7 @@ impl<'a> Packet<'a> {
         // slices do not overlap (stack locals vs. WASM linear memory).
         unsafe {
             let mac_bytes = core::slice::from_raw_parts(mac as *const _ as *const u8, mac_len);
-            let ip_bytes  = core::slice::from_raw_parts(ip  as *const _ as *const u8, ip_len);
+            let ip_bytes = core::slice::from_raw_parts(ip as *const _ as *const u8, ip_len);
             let tcp_bytes = core::slice::from_raw_parts(tcp as *const _ as *const u8, tcp_len);
 
             data[0..mac_len].copy_from_slice(mac_bytes);
@@ -391,4 +388,3 @@ impl<'a> Iterator for PacketBatchIter<'a> {
         self.iter.next().map(|pdu| Packet::new(pdu, self.umem_base))
     }
 }
-

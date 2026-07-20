@@ -1,7 +1,7 @@
 use super::{EndOffset, HeaderKind};
-use macaddr::MacAddr6 as MacAddress;
 use core::default::Default;
 use core::fmt;
+use macaddr::MacAddr6 as MacAddress;
 use network_types::eth::EtherType;
 
 /// A packet's MAC header.
@@ -15,7 +15,13 @@ pub struct MacHeader {
 
 impl fmt::Display for MacHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} > {} 0x{:04x}", self.src, self.dst, u16::from_be(self.etype))
+        write!(
+            f,
+            "{} > {} 0x{:04x}",
+            self.src,
+            self.dst,
+            u16::from_be(self.etype)
+        )
     }
 }
 

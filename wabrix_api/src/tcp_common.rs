@@ -1,12 +1,12 @@
 use alloc::string::String;
-use core::ptr;
 use core::mem::size_of;
-use network_types::eth::EtherType;
+use core::ptr;
 use macaddr::MacAddr6;
+use network_types::eth::EtherType;
 
+use crate::connections::{ConnectionNode, FlowKey, TcpState};
 use crate::headers::{IpHeader, MacHeader, TcpHeader};
 use crate::helpers::update_tcp_checksum;
-use crate::connections::{ConnectionNode, FlowKey, TcpState};
 
 // Standard TCP Flags
 pub const FLAG_FIN: u8 = 0x01;
@@ -158,8 +158,12 @@ pub fn write_tcp_reply(
     flags: u8,
 ) -> u32 {
     let mut mac = MacHeader::new();
-    mac.src = MacAddr6::new(src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
-    mac.dst = MacAddr6::new(dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5]);
+    mac.src = MacAddr6::new(
+        src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5],
+    );
+    mac.dst = MacAddr6::new(
+        dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5],
+    );
     mac.set_ethertype(EtherType::Ipv4);
 
     let mut ip = IpHeader::new();
@@ -238,7 +242,9 @@ pub fn run_tcp_state_machine(
         inc_stat!(STAT_RECV_PAYLOAD);
     } else if tcp_flags & FLAG_ACK != 0 {
         match conn.state {
-            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => (),
+            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => {
+                ()
+            }
             _ => inc_stat!(STAT_RECV_ACK),
         }
     }
@@ -279,8 +285,7 @@ pub fn run_tcp_state_machine(
             if tcp_flags & FLAG_FIN != 0 {
                 conn.state = TcpState::LastAck;
                 if seq_num == conn.rcv_nxt {
-                    conn.rcv_nxt =
-                        conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
+                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
                 }
                 let send_seq = conn.snd_nxt;
                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
@@ -349,11 +354,7 @@ pub fn run_tcp_state_machine(
         TcpState::Closed => {
             if tcp_flags & FLAG_RST == 0 {
                 inc_stat!(STAT_SENT_RST);
-                return Some((
-                    FLAG_RST,
-                    0,
-                    seq_num.wrapping_add(payload_len),
-                ));
+                return Some((FLAG_RST, 0, seq_num.wrapping_add(payload_len)));
             }
         }
         _ => {}

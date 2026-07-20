@@ -1,6 +1,6 @@
-use crate::BatchMetadata;
 use crate::exports::Pdu0;
 use crate::packet::Packet;
+use crate::BatchMetadata;
 
 // =============================================================================
 // MAILBOX-BASED ZERO-COPY API
@@ -42,10 +42,14 @@ impl<'a> MailboxBatch<'a> {
     }
 
     #[inline(always)]
-    pub fn len(&self) -> usize { self.pdus.len() }
+    pub fn len(&self) -> usize {
+        self.pdus.len()
+    }
 
     #[inline(always)]
-    pub fn is_empty(&self) -> bool { self.pdus.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.pdus.is_empty()
+    }
 
     /// Iterates over each packet slot, yielding a `MailboxPacket` for each one.
     #[inline(always)]
@@ -82,7 +86,11 @@ impl<'a> Iterator for MailboxBatchIter<'a> {
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         let (pdu, action) = self.iter.next()?;
-        Some(MailboxPacket { pdu, umem_base: self.umem_base, action })
+        Some(MailboxPacket {
+            pdu,
+            umem_base: self.umem_base,
+            action,
+        })
     }
 }
 
@@ -114,7 +122,9 @@ impl<'a> MailboxPacket<'a> {
 
     /// Original packet length as supplied by the host.
     #[inline(always)]
-    pub fn data_len(&self) -> u32 { self.pdu.data_len() }
+    pub fn data_len(&self) -> u32 {
+        self.pdu.data_len()
+    }
 
     /// Raw mutable pointer to the start of the packet payload within WASM linear memory.
     #[inline(always)]

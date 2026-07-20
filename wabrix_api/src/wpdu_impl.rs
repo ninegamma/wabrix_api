@@ -1,9 +1,9 @@
-use core::ptr;
-use crate::hstack::HeaderStack;
 use crate::headers::{
-    ArpIpv4Header, EndOffset, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader,
-    MAC_HDR_SIZE,
+    ArpIpv4Header, EndOffset, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader,
+    TcpHeader, UdpHeader, MAC_HDR_SIZE,
 };
+use crate::hstack::HeaderStack;
+use core::ptr;
 // Adjust imports as needed
 
 #[repr(C)]
@@ -78,7 +78,6 @@ impl Default for WPdu {
 }
 
 impl WPdu {
-
     /// Helper: Get the frame size in bytes
     #[inline(always)]
     pub(crate) fn frame_size(&self) -> usize {
@@ -125,7 +124,7 @@ impl WPdu {
 
     /// Returns a pointer to the start of the packet data in the frame.
     #[inline]
-    pub fn data_ptr(&self, umem_addr: usize,) -> *mut u8 {
+    pub fn data_ptr(&self, umem_addr: usize) -> *mut u8 {
         self.data_address(umem_addr, 0)
     }
 
@@ -144,7 +143,7 @@ impl WPdu {
     }
     #[inline(always)]
     pub fn base_ptr(&self, umem_addr: usize) -> *mut u8 {
-        (umem_addr + self.local_frame_offset()) as * mut u8
+        (umem_addr + self.local_frame_offset()) as *mut u8
     }
     #[inline(always)]
     pub fn base_addr(&self, umem_addr: usize) -> usize {
@@ -200,22 +199,36 @@ impl WPdu {
 
             match pdu_header {
                 Header::Null => (),
-                Header::Mac(ref mut p) => ptr::copy_nonoverlapping(hdr.as_mac().unwrap() as *const MacHeader, *p, 1),
-                Header::Ip(ref mut p) => ptr::copy_nonoverlapping(hdr.as_ip().unwrap() as *const IpHeader, *p, 1),
-                Header::Ipv6(ref mut p) => ptr::copy_nonoverlapping(hdr.as_ipv6().unwrap() as *const Ipv6Header, *p, 1),
-                Header::Tcp(ref mut p) => ptr::copy_nonoverlapping(hdr.as_tcp().unwrap() as *const TcpHeader, *p, 1),
-                Header::Udp(ref mut p) => ptr::copy_nonoverlapping(hdr.as_udp().unwrap() as *const UdpHeader, *p, 1),
-                Header::Icmp(ref mut p) => ptr::copy_nonoverlapping(hdr.as_icmp().unwrap() as *const IcmpHeader, *p, 1),
-                Header::ArpIpv4(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_arpipv4().unwrap() as *const ArpIpv4Header, *p, 1)
+                Header::Mac(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_mac().unwrap() as *const MacHeader, *p, 1)
                 }
+                Header::Ip(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_ip().unwrap() as *const IpHeader, *p, 1)
+                }
+                Header::Ipv6(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_ipv6().unwrap() as *const Ipv6Header, *p, 1)
+                }
+                Header::Tcp(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_tcp().unwrap() as *const TcpHeader, *p, 1)
+                }
+                Header::Udp(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_udp().unwrap() as *const UdpHeader, *p, 1)
+                }
+                Header::Icmp(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_icmp().unwrap() as *const IcmpHeader, *p, 1)
+                }
+                Header::ArpIpv4(ref mut p) => ptr::copy_nonoverlapping(
+                    hdr.as_arpipv4().unwrap() as *const ArpIpv4Header,
+                    *p,
+                    1,
+                ),
             };
         }
     }
 
     /// Assumes an Ethernet frame and parses up to L4
     #[inline]
-    pub fn parse(&mut self, umem_addr: usize,) -> usize {
+    pub fn parse(&mut self, umem_addr: usize) -> usize {
         // Clear any existing headers before parsing
         self.header_stack.clear();
 
@@ -232,7 +245,8 @@ impl WPdu {
         // `&mut *hdr_ptr` and `&*hdr_ptr` are never used simultaneously: `mac` is a shared
         // borrow used only for dispatch, and the mutable reference is consumed by `push()`.
         unsafe {
-            self.header_stack.push(self.base_addr(umem_addr), Header::Mac(&mut *hdr_ptr));
+            self.header_stack
+                .push(self.base_addr(umem_addr), Header::Mac(&mut *hdr_ptr));
             let mac = &*hdr_ptr;
 
             match mac.etype() {
@@ -263,7 +277,7 @@ impl WPdu {
     /// The fixed Fast Parser. It now accounts for the headroom!
     /// Supports: IPv4, IPv6, ARP, TCP, UDP, ICMP, ICMPv6, SCTP
     #[inline]
-    pub fn parse_fast(&mut self, umem_addr: usize,) -> usize {
+    pub fn parse_fast(&mut self, umem_addr: usize) -> usize {
         self.header_stack.clear();
         let l = self.data_len();
         if l < MAC_HDR_SIZE as u32 {
@@ -295,9 +309,8 @@ impl WPdu {
                 let ip_ptr = self.data_address(umem_addr, 14) as *const IpHeader;
                 // SAFETY: `l >= 14 + 20` was checked above; both reads are within the
                 // fully-accessible IPv4 header at `ip_ptr`.
-                let (l4_proto, ip_len) = unsafe {
-                    ((*ip_ptr).protocol(), (*ip_ptr).offset() as u16)
-                };
+                let (l4_proto, ip_len) =
+                    unsafe { ((*ip_ptr).protocol(), (*ip_ptr).offset() as u16) };
 
                 let l4_offset = 14 + ip_len;
 
@@ -434,7 +447,8 @@ impl WPdu {
         // bytes. The mutable reference is used only within this block and is not aliased.
         unsafe {
             let ip = &mut *hdr_ptr;
-            self.header_stack.push(self.base_addr(umem_addr), Header::Ip(ip));
+            self.header_stack
+                .push(self.base_addr(umem_addr), Header::Ip(ip));
 
             let next_offset = offset + ip.offset();
             match ip.protocol() {
@@ -452,7 +466,8 @@ impl WPdu {
         // SAFETY: All callers check that `data_len >= offset + TcpHeader::size()` before
         // calling, so `hdr` points to at least `size_of::<TcpHeader>()` valid bytes.
         unsafe {
-            self.header_stack.push(self.base_addr(umem_addr), Header::Tcp(&mut *hdr));
+            self.header_stack
+                .push(self.base_addr(umem_addr), Header::Tcp(&mut *hdr));
         }
     }
 
@@ -462,7 +477,8 @@ impl WPdu {
         // SAFETY: All callers check that `data_len >= offset + UdpHeader::size()` before
         // calling, so `hdr` points to at least `size_of::<UdpHeader>()` valid bytes.
         unsafe {
-            self.header_stack.push(self.base_addr(umem_addr), Header::Udp(&mut *hdr));
+            self.header_stack
+                .push(self.base_addr(umem_addr), Header::Udp(&mut *hdr));
         }
     }
 
@@ -472,7 +488,8 @@ impl WPdu {
         // SAFETY: All callers check that `data_len >= offset + IcmpHeader::size()` before
         // calling, so `hdr` points to at least `size_of::<IcmpHeader>()` valid bytes.
         unsafe {
-            self.header_stack.push(self.base_addr(umem_addr), Header::Icmp(&mut *hdr));
+            self.header_stack
+                .push(self.base_addr(umem_addr), Header::Icmp(&mut *hdr));
         }
     }
 
@@ -487,7 +504,8 @@ impl WPdu {
         unsafe {
             let arp = &mut *hdr;
             if arp.hw_type() == 1 && arp.proto_etype() == 0x0800 {
-                self.header_stack.push(self.base_addr(umem_addr), Header::ArpIpv4(&mut *hdr));
+                self.header_stack
+                    .push(self.base_addr(umem_addr), Header::ArpIpv4(&mut *hdr));
             }
         }
     }
@@ -498,7 +516,8 @@ impl WPdu {
         // SAFETY: The caller checks `l >= offset + Ipv6Header::size()` before calling, so
         // `hdr` points to at least `size_of::<Ipv6Header>()` (40) valid bytes.
         unsafe {
-            self.header_stack.push(self.base_addr(umem_addr), Header::Ipv6(&mut *hdr));
+            self.header_stack
+                .push(self.base_addr(umem_addr), Header::Ipv6(&mut *hdr));
         }
         let next_header;
         // SAFETY: Same bounds as above; reading `next_header` from an already-validated pointer.
@@ -510,19 +529,19 @@ impl WPdu {
             6 => {
                 // TCP
                 if self.data_len() >= (offset + Ipv6Header::size() + TcpHeader::size()) as u32 {
-                    self.parse_tcp(umem_addr,offset + Ipv6Header::size());
+                    self.parse_tcp(umem_addr, offset + Ipv6Header::size());
                 }
             }
             17 => {
                 // UDP
                 if self.data_len() >= (offset + Ipv6Header::size() + UdpHeader::size()) as u32 {
-                    self.parse_udp(umem_addr,offset + Ipv6Header::size());
+                    self.parse_udp(umem_addr, offset + Ipv6Header::size());
                 }
             }
             58 => {
                 // ICMPv6
                 if self.data_len() >= (offset + Ipv6Header::size() + IcmpHeader::size()) as u32 {
-                    self.parse_icmp(umem_addr,offset + Ipv6Header::size());
+                    self.parse_icmp(umem_addr, offset + Ipv6Header::size());
                 }
             }
             _ => {}
@@ -564,7 +583,11 @@ impl WPdu {
         // Source (stack) and destination (UMEM frame) do not overlap.
         unsafe {
             let dst_addr = umem_addr + new_desc_addr as usize;
-            ptr::copy_nonoverlapping(header as *const T as *const u8, dst_addr as *mut u8, header_size);
+            ptr::copy_nonoverlapping(
+                header as *const T as *const u8,
+                dst_addr as *mut u8,
+                header_size,
+            );
         }
 
         // 6. Update PDU State
@@ -683,7 +706,10 @@ impl Pdu0 {
     /// Creates a local, non-host-owned `Pdu0` from a `WPdu` scratch buffer.
     /// `ManuallyDrop` prevents the panicking `Drop` impl from firing when the value goes out of scope.
     pub(crate) fn local(w: WPdu) -> core::mem::ManuallyDrop<Self> {
-        core::mem::ManuallyDrop::new(Pdu0 { w, _do_not_touch_padding: 0 })
+        core::mem::ManuallyDrop::new(Pdu0 {
+            w,
+            _do_not_touch_padding: 0,
+        })
     }
 
     #[inline]
@@ -693,12 +719,7 @@ impl Pdu0 {
         // uniquely owned. `count` is rounded down to whole `Pdu0` structs, so we never read
         // past the slice end. `Pdu0` is `#[repr(C, align(64))]`; the caller must ensure the
         // buffer is 64-byte aligned (guaranteed by the host WASM ABI).
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                bytes.as_mut_ptr() as *mut Self,
-                count,
-            )
-        }
+        unsafe { core::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut Self, count) }
     }
 
     /// Returns a mutable slice to the packet data.
@@ -718,7 +739,6 @@ impl Pdu0 {
         // the contract from `data_mut`'s caller guarantees no aliasing mutable reference.
         core::slice::from_raw_parts_mut(ptr, self.frame_size())
     }
-
 
     /// Serializes fully formed MAC, IPv4, and TCP headers into Wasm linear memory.
     /// Returns the total length of the written headers.
@@ -756,6 +776,5 @@ impl Pdu0 {
         (mac_len + ip_len + tcp_len) as u32
     }
 }
-
 
 const _: () = assert!(size_of::<Pdu0>() == 64);

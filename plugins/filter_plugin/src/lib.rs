@@ -1,11 +1,11 @@
 #![no_std]
 extern crate alloc;
 
+use crate::exports::wabrix::plugins::inspector::Guest;
 use alloc::vec::Vec;
 use core::slice;
 use wabrix_api::headers::HeaderKind;
 use wabrix_api::packet::PacketBatch;
-use crate::exports::wabrix::plugins::inspector::{Guest};
 
 // 1. Tell the macro to read the .wit file and generate the bindings
 wit_bindgen::generate!({
@@ -34,7 +34,7 @@ impl Guest for MyInspector {
     fn inspect_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
         let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
         let mut actions = Vec::with_capacity(batch.len());
-        
+
         for packet in batch.iter_mut() {
             let mut action = 0u32;
 
@@ -51,11 +51,7 @@ impl Guest for MyInspector {
             if is_v4 && dst_port.is_some() {
                 action |= ROUTE_STANDARD;
                 let port = dst_port.unwrap_or(0);
-                let telemetry_bucket = if port <= 9 {
-                    port as u32
-                } else {
-                    10
-                };
+                let telemetry_bucket = if port <= 9 { port as u32 } else { 10 };
                 action |= telemetry_bucket << 16;
             } else {
                 action |= ROUTE_STANDARD;

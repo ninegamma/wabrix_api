@@ -5,21 +5,21 @@ use crate::wpdu_impl::Pdu0;
 
 pub mod headers;
 pub mod helpers;
-pub mod packet;
 pub mod mailbox_api;
+pub mod packet;
 // Declare the implementation file, but keep it hidden from the outside world.
 mod wpdu_impl;
 // Declare the routing module as public.
 // (It will decide internally what to actually export).
+pub mod connections;
 pub mod exports;
 mod hstack;
-pub mod connections;
 pub mod tcp_common;
 
 /// The maximum number of packets in a single batch.
 pub const MAX_BATCH_SIZE: usize = 512;
 
-pub const TELEMETRY_FLAG: u32  = 1 << 8; // Bit 8
+pub const TELEMETRY_FLAG: u32 = 1 << 8; // Bit 8
 
 /// Strongly typed enum for the reserved standard opcodes (0x0000 - 0x0FFF).
 /// These represent generic system events that any plugin should understand.
@@ -30,25 +30,25 @@ pub enum StandardOpcode {
     /// Payload: u8 (0=Offline, 1=Online, 2=Bypass)
     SetOperationalState = 0x0001,
     /// Payload: Empty, or u8 flag for specific tables
-    FlushState          = 0x0002,
+    FlushState = 0x0002,
 
     // --- Observability & Debugging (0x0010 - 0x001F) ---
     /// Payload: u8 (0=Error, 1=Warn, 2=Info, 3=Debug, 4=Trace)
-    SetLogLevel         = 0x0010,
+    SetLogLevel = 0x0010,
     /// Payload: Empty. Triggers a dump to stdout/telemetry.
-    TriggerMemoryDump   = 0x0011,
+    TriggerMemoryDump = 0x0011,
 
     // --- Traffic Shaping & Protection (0x0020 - 0x002F) ---
     /// Payload: u64 (PPS) or JSON string
-    SetRateLimit        = 0x0020,
+    SetRateLimit = 0x0020,
     /// Payload: JSON list of IPs/CIDRs
-    UpdateBlocklist     = 0x0021,
+    UpdateBlocklist = 0x0021,
 
     // --- Schema & Capabilities (0x00F0 - 0x00FF) ---
     /// Payload: Empty. Tells the plugin to push a new UI JSON manifest.
-    RefreshManifest     = 0x00FE,
+    RefreshManifest = 0x00FE,
     /// Payload: u64 timestamp or sequence number for health checks.
-    Ping                = 0x00FF,
+    Ping = 0x00FF,
 }
 
 /// The overarching opcode representation that gracefully handles
@@ -99,7 +99,7 @@ impl From<PluginOpcode> for u32 {
 #[repr(C)]
 pub struct BatchMetadata {
     /// Written by host before calling process-batch: AF_XDP frame descriptor offsets (UMEM-relative)
-    pub pdus:  [Pdu0; MAX_BATCH_SIZE],
+    pub pdus: [Pdu0; MAX_BATCH_SIZE],
     /// Written by plugin during process-batch: routing decisions (route_id)
-    pub actions:     [u32; MAX_BATCH_SIZE],
+    pub actions: [u32; MAX_BATCH_SIZE],
 }
