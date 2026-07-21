@@ -1,5 +1,5 @@
 use crate::exports::Pdu0;
-use crate::packet::Packet;
+use crate::packet::{Packet, PacketBatch, PacketBatchIter};
 use crate::BatchMetadata;
 
 // =============================================================================
@@ -11,19 +11,14 @@ use crate::BatchMetadata;
 /// The host writes `pdus` into the `BatchMetadata` before calling `process-batch`.
 /// The plugin processes each packet in place, then writes routing decisions back
 /// into `actions`.
+/// A batch of mailbox packets, wrapping a standard `PacketBatch`.
 pub struct MailboxBatch<'a> {
-    pdus: &'a mut [Pdu0],
+    batch: PacketBatch<'a>,
+    // Additional mailbox-specific ring pointers or action slices
     actions: &'a mut [u32],
-    umem_base: usize,
 }
 
 impl<'a> MailboxBatch<'a> {
-    /// Constructs a `MailboxBatch` from the three arguments passed by the host.
-    ///
-    /// - `batch_size`: number of valid slots in the mailbox.
-    /// - `partition_offset`: equals `partition_start_bytes` for this instance; used to compute
-    ///   `umem_base = 0u32.wrapping_sub(partition_offset) as usize`.
-    /// - `mailbox_offset`: UMEM-relative byte offset to this instance's `BatchMetadata`.
     #[inline(always)]
     pub fn new(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> Self {
         let umem_base = (0u32).wrapping_sub(partition_offset) as usize;
@@ -35,49 +30,50 @@ impl<'a> MailboxBatch<'a> {
         let len = batch_size as usize;
 
         Self {
-            pdus: &mut mailbox.pdus[..len],
+            batch: PacketBatch { pdus: &mut mailbox.pdus[..len], umem_base } ,
             actions: &mut mailbox.actions[..len],
-            umem_base,
         }
     }
 
+    /// Custom batch-level method unique to mailboxes
     #[inline(always)]
-    pub fn len(&self) -> usize {
-        self.pdus.len()
+    pub fn flush_actions(&mut self) {
+        // Mailbox-specific ring submission logic
     }
 
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.pdus.is_empty()
-    }
-
-    /// Iterates over each packet slot, yielding a `MailboxPacket` for each one.
     #[inline(always)]
     pub fn iter_mut(&mut self) -> MailboxBatchIter<'_> {
         MailboxBatchIter {
-            iter: self.pdus.iter_mut().zip(self.actions.iter_mut()),
-            umem_base: self.umem_base,
+            packet_iter: self.batch.iter_mut(),
+            action_iter: self.actions.iter_mut(),
         }
     }
 }
 
-impl<'a> IntoIterator for MailboxBatch<'a> {
-    type Item = MailboxPacket<'a>;
-    type IntoIter = MailboxBatchIter<'a>;
+// =====================================================================
+// MAGIC: Deref Coercion for Batches
+// =====================================================================
+
+impl<'a> core::ops::Deref for MailboxBatch<'a> {
+    type Target = PacketBatch<'a>;
 
     #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter {
-        MailboxBatchIter {
-            iter: self.pdus.iter_mut().zip(self.actions.iter_mut()),
-            umem_base: self.umem_base,
-        }
+    fn deref(&self) -> &Self::Target {
+        &self.batch
     }
 }
 
-/// Iterator over `MailboxBatch` that yields one `MailboxPacket` per slot.
+impl<'a> core::ops::DerefMut for MailboxBatch<'a> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.batch
+    }
+}
+
 pub struct MailboxBatchIter<'a> {
-    iter: core::iter::Zip<core::slice::IterMut<'a, Pdu0>, core::slice::IterMut<'a, u32>>,
-    umem_base: usize,
+    packet_iter: PacketBatchIter<'a>,
+    // An iterator or slice over the concurrent action buffer
+    action_iter: core::slice::IterMut<'a, u32>,
 }
 
 impl<'a> Iterator for MailboxBatchIter<'a> {
@@ -85,69 +81,58 @@ impl<'a> Iterator for MailboxBatchIter<'a> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        let (pdu, action) = self.iter.next()?;
-        Some(MailboxPacket {
-            pdu,
-            umem_base: self.umem_base,
-            action,
-        })
+        // Pull the next standard packet and the next mutable action reference simultaneously
+        let packet = self.packet_iter.next()?;
+        let action = self.action_iter.next()?;
+
+        Some(MailboxPacket::new(packet, action))
     }
 }
 
+
 /// A single packet slot from a `MailboxBatch`.
 ///
-/// Holds a direct mutable reference into the host-written `Pdu0` in the mailbox.
-/// Call `parse_fast()` before accessing any header accessors. Write the routing
-/// decision back via `set_action()`.
+/// Wraps a standard `Packet<'a>` and adds mailbox-specific action handling.
 pub struct MailboxPacket<'a> {
-    pdu: &'a mut Pdu0,
-    umem_base: usize,
+    packet: Packet<'a>,
     action: &'a mut u32,
 }
 
 impl<'a> MailboxPacket<'a> {
-    /// Parse packet headers. Must be called before `fingerprint()` or any header
-    /// accessor on a `Packet` obtained via `as_packet()`.
     #[inline(always)]
-    pub fn parse_fast(&mut self) -> usize {
-        self.pdu.parse_fast(self.umem_base)
-    }
-
-    /// Returns `true` if this packet carries the 0x88B5 "tick" EtherType.
-    /// Does NOT require `parse_fast()` to have been called first.
-    #[inline(always)]
-    pub fn is_a_tick(&self) -> bool {
-        self.pdu.is_a_tick(self.umem_base)
-    }
-
-    /// Original packet length as supplied by the host.
-    #[inline(always)]
-    pub fn data_len(&self) -> u32 {
-        self.pdu.data_len()
-    }
-
-    /// Raw mutable pointer to the start of the packet payload within WASM linear memory.
-    #[inline(always)]
-    pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        self.pdu.data_ptr(self.umem_base)
-    }
-
-    /// Protocol fingerprint from the header stack (populated by `parse_fast()`).
-    #[inline(always)]
-    pub fn fingerprint(&self) -> u32 {
-        self.pdu.header_stack.fingerprint()
-    }
-
-    /// Creates a temporary `Packet<'_>` that borrows this packet's `Pdu0`.
-    /// Use this to call functions that take `&mut Packet<'_>` (e.g. `handle_tcp_packet`).
-    #[inline(always)]
-    pub fn as_packet(&mut self) -> Packet<'_> {
-        Packet::new(self.pdu, self.umem_base)
+    pub fn new(packet: Packet<'a>, action: &'a mut u32) -> Self {
+        Self { packet, action }
     }
 
     /// Write the routing decision for this packet back into the mailbox.
     #[inline(always)]
     pub fn set_action(&mut self, action: u32) {
         *self.action = action;
+    }
+
+    /// Optional: If code specifically expects to unwrap into a standard Packet reference
+    #[inline(always)]
+    pub fn as_packet(&mut self) -> &mut Packet<'a> {
+        &mut self.packet
+    }
+}
+
+// =====================================================================
+// MAGIC: Deref Coercion lets MailboxPacket inherit all Packet methods!
+// =====================================================================
+
+impl<'a> core::ops::Deref for MailboxPacket<'a> {
+    type Target = Packet<'a>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.packet
+    }
+}
+
+impl<'a> core::ops::DerefMut for MailboxPacket<'a> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.packet
     }
 }

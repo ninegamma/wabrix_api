@@ -333,8 +333,8 @@ impl<'a> Packet<'a> {
 
 /// A safe, zero-cost wrapper around the raw linear memory passed to Wasm.
 pub struct PacketBatch<'a> {
-    pdus: &'a mut [Pdu0],
-    umem_base: usize,
+    pub(crate) pdus: &'a mut [Pdu0],
+    pub(crate) umem_base: usize,
 }
 
 const _: () = assert!(size_of::<Pdu0>() == 64);
