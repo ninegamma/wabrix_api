@@ -63,8 +63,6 @@ pub struct ConnectionNode {
 // - Removed alloc crate dependencies
 // - Rely strictly on core primitives
 
-const HASH_TABLE_SIZE: usize = 1_048_576; // - Must be a power of two for fast masking
-
 // - Sentinel values
 pub const NULL_NODE: usize = usize::MAX; // arena free-list / linked-list sentinel
 pub const EMPTY_SLOT: usize = usize::MAX; // hash table: slot was never occupied — stops linear probe
@@ -87,29 +85,6 @@ pub struct ConnectionPool {
 
     // - Suppress repeated "pool full" log spam: true while pool is at capacity
     pool_full_logged: bool,
-}
-
-impl FlowKey {
-    // - Simple, fast hash function for the TCP 4-tuple
-    // - Avoids cryptographic overhead of standard SipHash
-    #[inline]
-    fn hash_index(&self) -> usize {
-        let mut h = self.0.wrapping_add(self.2);
-        h ^= (self.1 as u32).wrapping_shl(16) | (self.3 as u32);
-        h = h.wrapping_mul(0x85ebca6b);
-        (h as usize) & (HASH_TABLE_SIZE - 1)
-    }
-
-    /* much two slow
-    #[inline]
-    fn hash_index(&self) -> usize {
-        // MurmurHash3-style finalizer for high avalanche effect
-        let mut h = self.0.wrapping_mul(0x45d9f3b) ^ (self.2 as u32);
-        h = h.wrapping_mul(0x45d9f3b) ^ (self.1 as u32);
-        h = h.wrapping_mul(0x45d9f3b) ^ (self.3 as u32);
-        (h as usize) & (HASH_TABLE_SIZE - 1)
-    }
-    */
 }
 
 impl ConnectionPool {

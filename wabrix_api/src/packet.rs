@@ -288,6 +288,11 @@ impl<'a> Packet<'a> {
         None
     }
 
+    #[inline]
+    pub fn payload(&self) -> Option<&[u8]> {
+        self.pdu.payload(self.umem_base)
+    }
+
     /// Serializes fully formed MAC, IPv4, and TCP headers into Wasm linear memory.
     /// Returns the total length of the written headers.
     #[inline(always)]

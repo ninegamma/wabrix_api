@@ -64,6 +64,47 @@ impl Guest for MyInspector {
 
         actions
     }
+    
+/*
+    fn inspect_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
+        // Zero-copy: Parse the entire batch directly from shared UMEM
+        let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
+        let mut actions = Vec::with_capacity(batch.len());
+
+        for packet in batch.iter_mut() {
+            let mut action = 0u32;
+
+            let is_v4 = packet.ipv4_header().is_some();
+            let dst_port = packet.udp_header().map(|udp| udp.dst_port());
+
+            // --- CUSTOM PROTOCOL LOGIC (The "Aha" Moment) ---
+            if is_v4 && dst_port == Some(9000) {
+                if let Some(payload) = packet.payload() {
+                    // Deep Packet Inspection: Drop malicious debug commands instantly
+                    if payload.len() >= 5 && payload[4] == 0xFF {
+                        action |= ROUTE_DROP;
+                        action |= 99 << 16; // Send to Telemetry bucket 99 ("Threat Blocked")
+                        actions.push(action);
+                        continue;
+                    }
+                }
+            }
+
+            // --- STANDARD ROUTING & TELEMETRY ---
+            action |= ROUTE_STANDARD;
+
+            // Dynamic telemetry binning based on destination port
+            let port = dst_port.unwrap_or(0);
+            let port_bin = port >> 10;
+            let telemetry_bucket = if port_bin <= 9 { port_bin as u32 } else { 10 };
+            action |= telemetry_bucket << 16;
+
+            actions.push(action);
+        }
+
+        actions
+    }
+*/
 }
 
 export!(MyInspector);

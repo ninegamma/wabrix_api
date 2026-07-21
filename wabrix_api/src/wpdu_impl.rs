@@ -90,7 +90,7 @@ impl WPdu {
     pub fn local_frame_offset(&self) -> usize {
         (self.desc_addr & !((1u64 << self.frame_size_log2) - 1)) as usize
     }
-
+    #[allow(dead_code)]
     #[inline(always)]
     fn local_frame_idx(&self) -> u32 {
         (self.local_frame_offset() >> self.frame_size_log2) as u32
@@ -665,6 +665,67 @@ impl WPdu {
         }
         None
     }
+    #[inline]
+    fn payload_bounds(&self, umem_addr: usize) -> Option<(usize, usize)> {
+        let count = self.header_stack.count();
+        if count == 0 {
+            return None; // No headers parsed, so the payload boundary is unknown
+        }
+
+        let base_addr = self.base_addr(umem_addr);
+        let last_idx = count - 1;
+
+        // Retrieve the last parsed header
+        let last_header = self.header_stack.get(base_addr, last_idx);
+
+        // Determine the byte size of the last header using the offset trait/method.
+        let last_header_size = last_header.offset().unwrap_or(0);
+
+        // Calculate absolute bounds relative to base_addr
+        let last_offset = self.header_stack.offsets[last_idx] as usize;
+        let payload_start = last_offset + last_header_size;
+
+        // Data boundaries
+        let data_end_offset = self.headroom() + self.desc_len as usize;
+
+        // Bounds check to ensure the payload doesn't exceed the frame data
+        if payload_start <= data_end_offset {
+            let payload_len = data_end_offset - payload_start;
+            Some((payload_start, payload_len))
+        } else {
+            None
+        }
+    }
+
+    /// Returns a slice to the payload data following the last parsed header.
+    #[inline]
+    pub fn payload(&self, umem_addr: usize) -> Option<&[u8]> {
+        let base_addr = self.base_addr(umem_addr);
+        if let Some((payload_start, payload_len)) = self.payload_bounds(umem_addr) {
+            let payload_ptr = (base_addr + payload_start) as *const u8;
+
+            // SAFETY: payload_start and payload_len are bounds-checked against the PDU's
+            // verified total data length (desc_len) and headroom.
+            Some(unsafe { core::slice::from_raw_parts(payload_ptr, payload_len) })
+        } else {
+            None
+        }
+    }
+
+    /// Returns a mutable slice to the payload data following the last parsed header.
+    #[inline]
+    pub fn payload_mut(&mut self, umem_addr: usize) -> Option<&mut [u8]> {
+        let base_addr = self.base_addr(umem_addr);
+        if let Some((payload_start, payload_len)) = self.payload_bounds(umem_addr) {
+            let payload_ptr = (base_addr + payload_start) as *mut u8;
+
+            // SAFETY: Bounds are verified against the PDU data boundaries.
+            // Exclusive mutable access is guaranteed by taking `&mut self`.
+            Some(unsafe { core::slice::from_raw_parts_mut(payload_ptr, payload_len) })
+        } else {
+            None
+        }
+    }
 }
 
 #[repr(C, align(64))]
@@ -703,15 +764,6 @@ impl Drop for Pdu0 {
 }
 
 impl Pdu0 {
-    /// Creates a local, non-host-owned `Pdu0` from a `WPdu` scratch buffer.
-    /// `ManuallyDrop` prevents the panicking `Drop` impl from firing when the value goes out of scope.
-    pub(crate) fn local(w: WPdu) -> core::mem::ManuallyDrop<Self> {
-        core::mem::ManuallyDrop::new(Pdu0 {
-            w,
-            _do_not_touch_padding: 0,
-        })
-    }
-
     #[inline]
     pub fn slice_from_bytes(bytes: &mut [u8]) -> &mut [Self] {
         let count = bytes.len() / core::mem::size_of::<Self>();
