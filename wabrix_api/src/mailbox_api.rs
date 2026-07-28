@@ -83,7 +83,11 @@ impl<'a> Iterator for MailboxBatchIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         // Pull the next standard packet and the next mutable action reference simultaneously
         let packet = self.packet_iter.next()?;
-        let action = self.action_iter.next()?;
+
+        // SAFETY: `packet_iter` and `action_iter` are initialized from slices
+        // of the exact same length in `MailboxBatch::new`. If packet is Some,
+        // action is guaranteed to be Some.
+        let action = unsafe { self.action_iter.next().unwrap_unchecked() };
 
         Some(MailboxPacket::new(packet, action))
     }
