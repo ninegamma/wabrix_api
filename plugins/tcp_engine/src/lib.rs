@@ -152,18 +152,18 @@ fn init_state_machine(tcp_node_name: String) {
 struct TcpEngine;
 
 impl Guest for TcpEngine {
-    // init_data is called once per plugin instance, and is responsible for initializing the state of the plugin.
-    // It is called before any other function in the plugin.
-    // The init_data function is called with the following arguments:
-    // - data: A vector of key-value pairs, where each pair is a (key, value) tuple.
-    //   the key value pairs are set in the .toml file for a node of type WasmEngine in the section "wasm_data"
-    // - tsc_frequency: The frequency of the TSC counter, in Hz.
-    // The init_data function should initialize the plugin's state, such as the connection pool
-    // or any other state that needs to be maintained across batches.
-    // The init_data function should also set the tsc_frequency value in the EngineConfig struct.
-    // The init_data function should return a boolean value indicating whether the initialization was successful.
-    // If the initialization is successful, the plugin will be ready to process batches.
-    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency: u64) {
+    // - init_data is called once per plugin instance, and is responsible for initializing the state of the plugin.
+    // - It is called before any other function in the plugin.
+    // - The init_data function is called with the following arguments:
+    //   - data: A vector of key-value pairs, where each pair is a (key, value) tuple.
+    //     The key value pairs are set in the .toml file for a node of type WasmEngine in the section "wasm_data"
+    //   - tsc_frequency: The frequency of the TSC counter, in Hz.
+    // - The init_data function should initialize the plugin's state, such as the connection pool
+    //   or any other state that needs to be maintained across batches.
+    // - The init_data function should also set the tsc_frequency value in the EngineConfig struct.
+    // - The init_data function returns a boolean value indicating whether the initialization was successful.
+    // - If the initialization is successful, the plugin will be ready to process batches.
+    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency: u64) -> bool {
         init_logging();
         let mut config = EngineConfig::default();
         config.bypass = false;
@@ -173,22 +173,71 @@ impl Guest for TcpEngine {
         for (key, value) in data {
             match key.as_str() {
                 "name" => config.name = Some(value),
-                "src_mac" => config.src_mac = parse_mac(&value),
-                "dst_mac" => config.dst_mac = parse_mac(&value),
+                "src_mac" => {
+                    config.src_mac = parse_mac(&value);
+                    if config.src_mac.is_none() {
+                        return false;
+                    }
+                }
+                "dst_mac" => {
+                    config.dst_mac = parse_mac(&value);
+                    if config.dst_mac.is_none() {
+                        return false;
+                    }
+                }
                 "src_ip" => {
                     raw_src_ip = Some(value.clone());
                     config.src_ip = parse_ip(&value);
+                    if config.src_ip.is_none() {
+                        return false;
+                    }
                 }
-                "dst_ip" => config.dst_ip = parse_ip(&value),
-                "rng_seed" => config.rng_seed = value.parse::<u32>().ok(),
-                "syn_rate" => config.syn_rate = parse_suffixed_number(&value).ok(),
-                "syn_limit" => config.syn_limit = parse_suffixed_number(&value).ok(),
-                "close_timeout" => config.close_timeout_millis = value.parse::<u64>().ok(),
+                "dst_ip" => {
+                    config.dst_ip = parse_ip(&value);
+                    if config.dst_ip.is_none() {
+                        return false;
+                    }
+                }
+                "rng_seed" => {
+                    config.rng_seed = value.parse::<u32>().ok();
+                    if config.rng_seed.is_none() {
+                        return false;
+                    }
+                }
+                "syn_rate" => {
+                    config.syn_rate = parse_suffixed_number(&value).ok();
+                    if config.syn_rate.is_none() {
+                        return false;
+                    }
+                }
+                "syn_limit" => {
+                    config.syn_limit = parse_suffixed_number(&value).ok();
+                    if config.syn_limit.is_none() {
+                        return false;
+                    }
+                }
+                "close_timeout" => {
+                    config.close_timeout_millis = value.parse::<u64>().ok();
+                    if config.close_timeout_millis.is_none() {
+                        return false;
+                    }
+                }
                 _ => {}
             }
         }
 
-        // Resolve node name using fallback chain
+        // - Verify the presence of strictly required parameters.
+        // - Reject initialization if fundamental routing data is missing.
+        // - Note, dst_ip is not necessary for pure tcp servers, as they always reply to the client ip
+        //   but we need dst mac as we have no full routing stack
+        if config.src_ip.is_none()
+            || config.src_mac.is_none()
+            || config.dst_mac.is_none()
+        {
+            return false;
+        }
+
+        // - Resolve node name using fallback chain
         let node_name = config
             .name
             .clone()
@@ -199,6 +248,8 @@ impl Guest for TcpEngine {
 
         config.tsc_frequency = tsc_frequency;
         *CONFIG.borrow_mut() = Some(config);
+
+        true
     }
 
     fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {

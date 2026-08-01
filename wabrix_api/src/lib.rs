@@ -31,7 +31,8 @@ pub enum StandardOpcode {
     SetOperationalState = 0x0001,
     /// Payload: Empty, or u8 flag for specific tables
     FlushState = 0x0002,
-
+    /// Hot updating the configuration
+    UpdateConfiguration = 0x0003,
     // --- Observability & Debugging (0x0010 - 0x001F) ---
     /// Payload: u8 (0=Error, 1=Warn, 2=Info, 3=Debug, 4=Trace)
     SetLogLevel = 0x0010,
@@ -67,6 +68,7 @@ impl From<u32> for PluginOpcode {
         match value {
             0x0001 => Self::Standard(StandardOpcode::SetOperationalState),
             0x0002 => Self::Standard(StandardOpcode::FlushState),
+            0x0003 => Self::Standard(StandardOpcode::UpdateConfiguration),
             0x0010 => Self::Standard(StandardOpcode::SetLogLevel),
             0x0011 => Self::Standard(StandardOpcode::TriggerMemoryDump),
             0x0020 => Self::Standard(StandardOpcode::SetRateLimit),
