@@ -5,20 +5,14 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use core::ptr;
 
-use macaddr::MacAddr6;
-use network_types::eth::EtherType;
-
-use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
-//use wabrix_api::hstack::HeaderStack;
 use crate::exports::wabrix::plugins::packet_engine::Guest;
 use crate::wabrix::plugins::logging;
-use wabrix_api::connections::{ConnectionNode, ConnectionPool, FlowKey, TcpState};
-use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number, update_tcp_checksum};
+use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
+use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::packet::Packet;
-use wabrix_api::{PluginOpcode, StandardOpcode};
+use wabrix_api::{HotWasmPayload, PluginOpcode, StandardOpcode};
 
 use wabrix_api::tcp_common::{
     run_tcp_state_machine, write_tcp_reply, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
@@ -79,7 +73,6 @@ impl<T> WasmValue<T> {
     }
 }
 
-const MAX_TIMEOUTS: usize = 131072; // 128k timeouts
 
 static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
@@ -91,7 +84,7 @@ static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
     ip_offset: 0,
     prng_state: 1,
     syns_sent: 0,
-    activated: false,
+    activated: true,
 });
 
 // Replaced AtomicU64 and Mutex<u64> with WasmValue (Instant access)
@@ -228,11 +221,12 @@ impl Guest for TcpEngine {
 
         // - Verify the presence of strictly required parameters.
         // - Reject initialization if fundamental routing data is missing.
-        // - Note, dst_ip is not necessary for pure tcp servers, as they always reply to the client ip
-        //   but we need dst mac as we have no full routing stack
+        // - Note, dst_ip is not necessary for pure tcp servers, as they always reply to the client ip,
+        //   but we need always dst mac-address as we have no full Ethernet/IP control stack
         if config.src_ip.is_none()
             || config.src_mac.is_none()
             || config.dst_mac.is_none()
+            || config.dst_ip.is_none() && config.syn_rate.is_some_and(|rate| rate > 0)
         {
             return false;
         }
@@ -541,47 +535,106 @@ impl Guest for TcpEngine {
     // Inside the Wasm plugin code
 
     fn on_control_event(raw_opcode: u32, payload: Vec<u8>) -> bool {
-        // 1. Convert the raw u32 into our rich enum
         let opcode = PluginOpcode::from(raw_opcode);
 
-        // 2. Route the command safely
         match opcode {
             PluginOpcode::Standard(StandardOpcode::SetOperationalState) => {
                 if payload.len() == 1 {
-                    set_state(payload[0]);
+                    let state = payload[0];
+                    set_state(state);
+                    log::info!("Operational state set to: {}", state);
                     true
                 } else {
+                    log::warn!("SetOperationalState failed: invalid payload length");
                     false
                 }
             }
             PluginOpcode::Standard(StandardOpcode::FlushState) => {
-                flush_state(payload[0]);
+                // Default to mode zero if no payload is provided
+                // Parse the mode byte if available
+                let mode = if payload.len() == 1 { payload[0] } else { 0 };
+                flush_state(mode);
+                log::info!("State flushed with mode: {}", mode);
                 true
             }
             PluginOpcode::Standard(StandardOpcode::Ping) => {
-                // Echo the payload back or log it
-                log::info!("PING received");
+                log::info!("PING received by TcpEngine");
                 true
             }
+            PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
+                if let Ok(data) = postcard::from_bytes::<HotWasmPayload>(&payload) {
 
-            // --- Developer's Custom Commands ---
-            PluginOpcode::Custom(0x1001) => {
-                //apply_modbus_rules(payload);
-                true
-            }
-            PluginOpcode::Custom(0x1002) => {
-                //clear_connection_cache();
-                true
-            }
+                    // Parse phase: validate all inputs before mutating state to ensure atomic updates
+                    let parsed_syn_rate = match data.updates.get("syn_rate") {
+                        Some(s) if s.is_empty() => Some(None),
+                        Some(s) => match parse_suffixed_number(s) {
+                            Ok(val) => Some(Some(val)),
+                            Err(_) => {
+                                log::warn!("UpdateConfiguration failed: invalid syn_rate");
+                                return false;
+                            }
+                        },
+                        None => None,
+                    };
 
-            // Unhandled or unknown commands
+                    let parsed_syn_limit = match data.updates.get("syn_limit") {
+                        Some(s) if s.is_empty() => Some(None),
+                        Some(s) => match parse_suffixed_number(s) {
+                            Ok(val) => Some(Some(val)),
+                            Err(_) => {
+                                log::warn!("UpdateConfiguration failed: invalid syn_limit");
+                                return false;
+                            }
+                        },
+                        None => None,
+                    };
+
+                    let parsed_close_timeout = match data.updates.get("close_timeout") {
+                        Some(s) if s.is_empty() => Some(None),
+                        Some(s) => match s.parse::<u64>() {
+                            Ok(val) => Some(Some(val)),
+                            Err(_) => {
+                                log::warn!("UpdateConfiguration failed: invalid close_timeout");
+                                return false;
+                            }
+                        },
+                        None => None,
+                    };
+
+                    // Apply phase: compare against current state to prevent redundant updates and logs
+                    let mut guard = CONFIG.borrow_mut();
+                    if let Some(ref mut config) = *guard {
+                        if let Some(new_val) = parsed_syn_rate {
+                            if config.syn_rate != new_val {
+                                config.syn_rate = new_val;
+                                log::info!("UpdateConfiguration: syn_rate updated");
+                            }
+                        }
+                        if let Some(new_val) = parsed_syn_limit {
+                            if config.syn_limit != new_val {
+                                config.syn_limit = new_val;
+                                log::info!("UpdateConfiguration: syn_limit updated");
+                            }
+                        }
+                        if let Some(new_val) = parsed_close_timeout {
+                            if config.close_timeout_millis != new_val {
+                                config.close_timeout_millis = new_val;
+                                log::info!("UpdateConfiguration: close_timeout updated");
+                            }
+                        }
+                    }
+                    true
+                } else {
+                    log::warn!("UpdateConfiguration failed: payload deserialization error");
+                    false
+                }
+            }
             _ => {
                 log::warn!("Ignored opcode: {:?}", opcode);
                 false
             }
         }
     }
-
     fn get_telemetry() -> Vec<u64> {
         let mut stats = TCP_STATS.borrow().to_vec();
         // Add current pool usage to stats

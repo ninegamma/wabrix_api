@@ -3,8 +3,7 @@ resolver = "2"
 members = [
     "wabrix_api",
     "plugins/tcp_engine",
-    "plugins/filter_plugin",
-    "plugins/generator_plugin",
+    "plugins/generator_plugin", "plugins/filter_engine",
 ]
 
 [workspace.package]

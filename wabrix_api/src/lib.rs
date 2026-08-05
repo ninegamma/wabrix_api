@@ -1,6 +1,9 @@
 #![no_std]
 extern crate alloc;
 
+use alloc::string::String;
+use hashbrown::HashMap;
+use serde::{Deserialize, Serialize};
 use crate::wpdu_impl::Pdu0;
 
 pub mod headers;
@@ -39,9 +42,7 @@ pub enum StandardOpcode {
     /// Payload: Empty. Triggers a dump to stdout/telemetry.
     TriggerMemoryDump = 0x0011,
 
-    // --- Traffic Shaping & Protection (0x0020 - 0x002F) ---
-    /// Payload: u64 (PPS) or JSON string
-    SetRateLimit = 0x0020,
+
     /// Payload: JSON list of IPs/CIDRs
     UpdateBlocklist = 0x0021,
 
@@ -71,7 +72,6 @@ impl From<u32> for PluginOpcode {
             0x0003 => Self::Standard(StandardOpcode::UpdateConfiguration),
             0x0010 => Self::Standard(StandardOpcode::SetLogLevel),
             0x0011 => Self::Standard(StandardOpcode::TriggerMemoryDump),
-            0x0020 => Self::Standard(StandardOpcode::SetRateLimit),
             0x0021 => Self::Standard(StandardOpcode::UpdateBlocklist),
             0x00FE => Self::Standard(StandardOpcode::RefreshManifest),
             0x00FF => Self::Standard(StandardOpcode::Ping),
@@ -104,4 +104,10 @@ pub struct BatchMetadata {
     pub pdus: [Pdu0; MAX_BATCH_SIZE],
     /// Written by plugin during process-batch: routing decisions (route_id)
     pub actions: [u32; MAX_BATCH_SIZE],
+}
+
+
+#[derive(Serialize, Deserialize)]
+pub struct HotWasmPayload {
+    pub updates: HashMap<String, String>,
 }

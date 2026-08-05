@@ -28,8 +28,6 @@ wabrix_api/
 ├── wabrix_api/          # Core SDK library: Packet<'a>, HeaderStack, protocol headers, routing types
 ├── plugins/
 │   ├── tcp_engine/            # Example engine plugin: implements the packet-engine WIT interface
-│   ├── icmp_filter/           # Example filter plugin: implements the inspector WIT interface
-│   ├── filter_plugin/         # Example filter plugin: implements the inspector WIT interface
 │   └── generator_plugin/      # Example generator plugin: implements the generator WIT interface
 └── wit/
     └── xbricks.wit            # WIT interface definitions (inspector, packet-engine, generator, logging)
@@ -41,8 +39,6 @@ wabrix_api/
 |---|---|---|
 | `wabrix_api` | Core SDK: `Packet<'a>`, `HeaderStack`, protocol header structs, routing result types, `StandardOpcode`; `no_std` compatible | `network-types`, `macaddr`, `byteorder`, `fnv`, `anyhow` |
 | `plugins/tcp_engine` | Example `engine-plugin`: implements `process-batch`, `process-timers`, `on-control-event`, `get-telemetry` | `wabrix_api`, `wit-bindgen`, `spin`, `network-types` |
-| `plugins/icmp_filter` | Example `filter-plugin`: implements `inspect-batch` | `wabrix_api`, `wit-bindgen` |
-| `plugins/filter_plugin` | Example `filter-plugin`: implements `inspect-batch` | `wabrix_api`, `wit-bindgen` |
 | `plugins/generator_plugin` | Example `generator-plugin`: implements `generate-batch` | `wabrix_api`, `wit-bindgen`, `network-types`, `macaddr`, `spin` |
 
 **Dependency direction is strictly one-way:** all plugin crates → `wabrix_api`. Never introduce reverse or circular dependencies.
