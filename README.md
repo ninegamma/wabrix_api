@@ -42,4 +42,4 @@ Wabrix plugins operate as nodes within a unified processing graph. By utilizing 
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](https://github.com/ninegamma/wabrix_api/blob/main/LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/ninegamma/wabrix_api/blob/master/LICENSE) file for details.
