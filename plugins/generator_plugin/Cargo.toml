@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # Pull this from your workspace.dependencies
 wit-bindgen = { workspace = true }
-wabrix_api = { path = "../../wabrix_api" }
+wabrix_api = { workspace = true }
 network-types = { workspace = true }
 macaddr = { workspace = true }
 spin = { workspace = true }

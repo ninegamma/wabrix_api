@@ -1,4 +1,3 @@
-use crate::exports::Pdu0;
 use crate::packet::{Packet, PacketBatch, PacketBatchIter};
 use crate::BatchMetadata;
 
