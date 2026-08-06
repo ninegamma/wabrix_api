@@ -76,8 +76,7 @@ impl Guest for FilterEngine {
     // Validates incoming configuration and prepares the active signature
     fn init_data(data: Vec<(String, String)>, _tsc_frequency: u64) -> bool {
         init_logging();
-        let mut config = FilterConfig::default();
-        config.bypass = false;
+        let mut config = FilterConfig { bypass: false, ..Default::default() };
 
         for (key, value) in data {
             if key == "signature" {
@@ -125,7 +124,7 @@ impl Guest for FilterEngine {
             // Memory is constrained to the WASM linear memory mapping defined by the host.
             let payload = unsafe {
                 core::slice::from_raw_parts(
-                    packet.data_ptr() as *const u8,
+                    packet.data_ptr(),
                     packet.data_len() as usize,
                 )
             };
@@ -133,11 +132,11 @@ impl Guest for FilterEngine {
             let mut matched = false;
 
             // Execute linear search for the malicious byte signature
-            if sig_len > 0 && payload.len() >= sig_len {
-                if payload.windows(sig_len).any(|window| window == config.signature.as_slice()) {
+            if sig_len > 0 && payload.len() >= sig_len
+                && payload.windows(sig_len).any(|window| window == config.signature.as_slice()) {
                     matched = true;
-                }
             }
+
 
             if matched {
                 packet.set_action(ROUTE_DROP);
@@ -162,17 +161,13 @@ impl Guest for FilterEngine {
         let opcode = PluginOpcode::from(raw_opcode);
 
         match opcode {
-            PluginOpcode::Standard(StandardOpcode::SetOperationalState) => {
-                if payload.len() == 1 {
-                    let mut guard = CONFIG.borrow_mut();
-                    if let Some(ref mut config) = *guard {
-                        config.bypass = payload[0] == 2;
-                        log::info!("Bypass mode updated");
-                    }
-                    true
-                } else {
-                    false
+            PluginOpcode::Standard(StandardOpcode::SetOperationalState) if payload.len() == 1 => {
+                let mut guard = CONFIG.borrow_mut();
+                if let Some(ref mut config) = *guard {
+                    config.bypass = payload[0] == 2;
+                    log::info!("Bypass mode updated");
                 }
+                true
             }
             PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
                 if let Ok(data) = postcard::from_bytes::<HotWasmPayload>(&payload) {

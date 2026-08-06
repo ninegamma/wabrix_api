@@ -250,24 +250,21 @@ impl WPdu {
             let mac = &*hdr_ptr;
 
             match mac.etype() {
-                0x0800 => {
-                    // IPv4
-                    if l >= mac.offset() + IpHeader::size() {
+                0x0800      // IPv4
+                    if l >= mac.offset() + IpHeader::size() => {
                         self.parse_ipv4(umem_addr, mac.offset());
                     }
-                }
-                0x86DD => {
-                    // IPv6
-                    if l >= mac.offset() + Ipv6Header::size() {
+
+                0x86DD      // IPv6
+                    if l >= mac.offset() + Ipv6Header::size() => {
                         self.parse_ipv6(umem_addr, mac.offset());
                     }
-                }
-                0x0806 => {
-                    // ARP
-                    if l >= mac.offset() + ArpIpv4Header::size() {
+
+                0x0806      // ARP
+                    if l >= mac.offset() + ArpIpv4Header::size() => {
                         self.parse_arp(umem_addr, mac.offset());
                     }
-                }
+
                 _ => {}
             }
         }
@@ -315,47 +312,25 @@ impl WPdu {
                 let l4_offset = 14 + ip_len;
 
                 match l4_proto {
-                    1 => {
+                    1 if l >= (l4_offset + 8) as u32 => {
                         // ICMP
-                        if l >= (l4_offset + 8) as u32 {
-                            self.header_stack.kinds[2] = HeaderKind::Icmp;
-                            self.header_stack.offsets[2] = hr + l4_offset;
-                            self.header_stack.hc = 3;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
+                        self.header_stack.kinds[2] = HeaderKind::Icmp;
+                        self.header_stack.offsets[2] = hr + l4_offset;
+                        self.header_stack.hc = 3;
                     }
-                    6 => {
+                    6 if l >= (l4_offset + 20) as u32 => {
                         // TCP
-                        if l >= (l4_offset + 20) as u32 {
-                            self.header_stack.kinds[2] = HeaderKind::Tcp;
-                            self.header_stack.offsets[2] = hr + l4_offset;
-                            self.header_stack.hc = 3;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
+                        self.header_stack.kinds[2] = HeaderKind::Tcp;
+                        self.header_stack.offsets[2] = hr + l4_offset;
+                        self.header_stack.hc = 3;
                     }
-                    17 => {
+                    17 if l >= (l4_offset + 8) as u32 => {
                         // UDP
-                        if l >= (l4_offset + 8) as u32 {
-                            self.header_stack.kinds[2] = HeaderKind::Udp;
-                            self.header_stack.offsets[2] = hr + l4_offset;
-                            self.header_stack.hc = 3;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
+                        self.header_stack.kinds[2] = HeaderKind::Udp;
+                        self.header_stack.offsets[2] = hr + l4_offset;
+                        self.header_stack.hc = 3;
                     }
-                    132 => {
-                        // SCTP
-                        if l >= (l4_offset + 12) as u32 {
-                            // Minimum SCTP header: 12 bytes
-                            // Note: SCTP not yet in HeaderKind enum, would need to be added
-                            // For now, just mark as parsed at IP level
-                            self.header_stack.hc = 2;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
-                    }
+                    // SCTP (132), truncated packets, and unknown protocols drop here
                     _ => {
                         self.header_stack.hc = 2;
                     }
@@ -378,61 +353,38 @@ impl WPdu {
                 let l4_offset = 14 + 40; // IPv6 header is always 40 bytes (no options in base header)
 
                 match next_header {
-                    6 => {
+                    6 if l >= l4_offset + 20 => {
                         // TCP
-                        if l >= l4_offset + 20 {
-                            self.header_stack.kinds[2] = HeaderKind::Tcp;
-                            self.header_stack.offsets[2] = hr + l4_offset as u16;
-                            self.header_stack.hc = 3;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
+                        self.header_stack.kinds[2] = HeaderKind::Tcp;
+                        self.header_stack.offsets[2] = hr + l4_offset as u16;
+                        self.header_stack.hc = 3;
                     }
-                    17 => {
+                    17 if l >= l4_offset + 8 => {
                         // UDP
-                        if l >= l4_offset + 8 {
-                            self.header_stack.kinds[2] = HeaderKind::Udp;
-                            self.header_stack.offsets[2] = hr + l4_offset as u16;
-                            self.header_stack.hc = 3;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
+                        self.header_stack.kinds[2] = HeaderKind::Udp;
+                        self.header_stack.offsets[2] = hr + l4_offset as u16;
+                        self.header_stack.hc = 3;
                     }
-                    58 => {
+                    58 if l >= l4_offset + 8 => {
                         // ICMPv6
-                        if l >= l4_offset + 8 {
-                            self.header_stack.kinds[2] = HeaderKind::Icmp;
-                            self.header_stack.offsets[2] = hr + l4_offset as u16;
-                            self.header_stack.hc = 3;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
+                        self.header_stack.kinds[2] = HeaderKind::Icmp;
+                        self.header_stack.offsets[2] = hr + l4_offset as u16;
+                        self.header_stack.hc = 3;
                     }
-                    132 => {
-                        // SCTP
-                        if l >= l4_offset + 12 {
-                            // SCTP not yet in HeaderKind enum
-                            self.header_stack.hc = 2;
-                        } else {
-                            self.header_stack.hc = 2;
-                        }
-                    }
+                    // SCTP (132), truncated packets, and unknown protocols drop here
                     _ => {
                         self.header_stack.hc = 2;
                     }
                 }
             }
-            0x0806 => {
-                // ARP
-                if l >= 14 + 28 {
-                    // Minimum ARP for IPv4: 28 bytes
-                    self.header_stack.kinds[1] = HeaderKind::ArpIpv4;
-                    self.header_stack.offsets[1] = hr + 14;
-                    self.header_stack.hc = 2;
-                }
+            0x0806 if l >= 14 + 28 => {
+                // ARP (Minimum ARP for IPv4: 28 bytes)
+                self.header_stack.kinds[1] = HeaderKind::ArpIpv4;
+                self.header_stack.offsets[1] = hr + 14;
+                self.header_stack.hc = 2;
             }
             _ => {
-                // Unknown EtherType - just MAC header
+                // Unknown EtherType or truncated ARP - just MAC header
             }
         }
 
@@ -526,24 +478,21 @@ impl WPdu {
             next_header = ipv6.next_header();
         }
         match next_header {
-            6 => {
-                // TCP
-                if self.data_len() >= (offset + Ipv6Header::size() + TcpHeader::size()) as u32 {
+            6   // TCP
+                if self.data_len() >= (offset + Ipv6Header::size() + TcpHeader::size()) as u32 => {
                     self.parse_tcp(umem_addr, offset + Ipv6Header::size());
                 }
-            }
-            17 => {
-                // UDP
-                if self.data_len() >= (offset + Ipv6Header::size() + UdpHeader::size()) as u32 {
+
+            17  // UDP
+                if self.data_len() >= (offset + Ipv6Header::size() + UdpHeader::size()) as u32 => {
                     self.parse_udp(umem_addr, offset + Ipv6Header::size());
                 }
-            }
-            58 => {
-                // ICMPv6
-                if self.data_len() >= (offset + Ipv6Header::size() + IcmpHeader::size()) as u32 {
+
+            58  // ICMPv6
+                if self.data_len() >= (offset + Ipv6Header::size() + IcmpHeader::size()) as u32 => {
                     self.parse_icmp(umem_addr, offset + Ipv6Header::size());
                 }
-            }
+
             _ => {}
         }
     }

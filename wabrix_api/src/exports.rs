@@ -14,6 +14,6 @@ pub use crate::wpdu_impl::*;
 // If the 'host' feature is NOT enabled, WPdu is restricted to crate-internal use.
 // ============================================================================
 #[cfg(not(feature = "host"))]
-pub(crate) use crate::hstack::*;
+//pub(crate) use crate::hstack::*;
 #[cfg(not(feature = "host"))]
 pub(crate) use crate::wpdu_impl::*;

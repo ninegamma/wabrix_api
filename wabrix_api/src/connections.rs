@@ -118,14 +118,14 @@ impl ConnectionPool {
 
         // 1. Update the previous node (or the head pointer)
         if prev != NULL_NODE {
-            self.arena[prev as usize].next = next;
+            self.arena[prev].next = next;
         } else {
             self.head = next;
         }
 
         // 2. Update the next node (or the tail pointer)
         if next != NULL_NODE {
-            self.arena[next as usize].prev = prev;
+            self.arena[next].prev = prev;
         } else {
             self.tail = prev;
         }

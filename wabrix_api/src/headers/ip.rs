@@ -74,7 +74,7 @@ impl IpHeader {
             // Reading 2+2 bytes for src/dst port via `from_raw_parts` is within bounds.
             unsafe {
                 let self_as_u8 = (self as *const IpHeader) as *const u8;
-                let port_as_u8 = self_as_u8.offset(self.offset() as isize);
+                let port_as_u8 = self_as_u8.add(self.offset());
                 let port_slice = slice::from_raw_parts(port_as_u8, 4);
                 let src_port = BigEndian::read_u16(&port_slice[..2]);
                 let dst_port = BigEndian::read_u16(&port_slice[2..]);

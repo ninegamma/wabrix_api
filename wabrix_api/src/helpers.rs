@@ -96,9 +96,9 @@ pub fn parse_mac(mac: &str) -> Option<[u8; 6]> {
     let mut bytes = [0u8; 6];
     let mut parts = mac.split(':');
 
-    for i in 0..6 {
+    for byte in &mut bytes {
         let part = parts.next()?;
-        bytes[i] = u8::from_str_radix(part, 16).ok()?;
+        *byte = u8::from_str_radix(part, 16).ok()?;
     }
 
     if parts.next().is_some() {
@@ -112,9 +112,9 @@ pub fn parse_ip(ip: &str) -> Option<[u8; 4]> {
     let mut bytes = [0u8; 4];
     let mut parts = ip.split('.');
 
-    for i in 0..4 {
+    for byte in &mut bytes {
         let part = parts.next()?;
-        bytes[i] = part.parse::<u8>().ok()?;
+        *byte = part.parse::<u8>().ok()?;
     }
 
     if parts.next().is_some() {

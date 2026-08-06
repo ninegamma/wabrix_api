@@ -368,6 +368,11 @@ impl<'a> PacketBatch<'a> {
         self.pdus.len()
     }
 
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.pdus.is_empty()
+    }
+
     /// Creates a zero-cost iterator that yields safe `Packet` wrappers
     #[inline(always)]
     pub fn iter_mut(&mut self) -> PacketBatchIter<'_> {

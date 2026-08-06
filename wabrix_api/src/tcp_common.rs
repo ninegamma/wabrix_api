@@ -130,6 +130,12 @@ impl TimeoutStack {
     }
 }
 
+impl Default for TimeoutStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl core::iter::Extend<FlowKey> for TimeoutStack {
     fn extend<T: IntoIterator<Item = FlowKey>>(&mut self, iter: T) {
         for key in iter {
@@ -143,9 +149,17 @@ impl core::iter::Extend<FlowKey> for TimeoutStack {
     }
 }
 
+
 /// Formats outbound Ethernet/IPv4/TCP headers directly into the frame buffer.
 /// Returns the total byte length of the written headers.
-pub fn write_tcp_reply(
+///
+/// # Safety
+///
+/// `data_ptr` points into the frame buffer with exclusive access granted
+/// by the caller. The three header structs are local stack variables; source and
+/// destination regions do not overlap. All types are `Copy` and `#[repr(C)]`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn write_tcp_reply(
     data_ptr: *mut u8,
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
@@ -191,14 +205,10 @@ pub fn write_tcp_reply(
     let ip_size = size_of::<IpHeader>();
     let tcp_size = size_of::<TcpHeader>();
 
-    // SAFETY: `data_ptr` points into the frame buffer with exclusive access granted
-    // by the caller. The three header structs are local stack variables; source and
-    // destination regions do not overlap. All types are `Copy` and `#[repr(C)]`.
-    unsafe {
-        ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
-        ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size) as *mut IpHeader, 1);
-        ptr::copy_nonoverlapping(&tcp, data_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
-    }
+
+    ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
+    ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size) as *mut IpHeader, 1);
+    ptr::copy_nonoverlapping(&tcp, data_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
 
     (mac_size + ip_size + tcp_size) as u32
 }
@@ -242,121 +252,111 @@ pub fn run_tcp_state_machine(
         inc_stat!(STAT_RECV_PAYLOAD);
     } else if tcp_flags & FLAG_ACK != 0 {
         match conn.state {
-            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => {
-                ()
-            }
+            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => {  }
             _ => inc_stat!(STAT_RECV_ACK),
         }
     }
 
     match conn.state {
-        TcpState::Listen => {
-            if tcp_flags & FLAG_SYN != 0 {
-                conn.state = TcpState::SynReceived;
-                conn.rcv_nxt = seq_num.wrapping_add(1);
-                let send_seq = conn.snd_nxt;
-                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-                inc_stat!(STAT_SENT_SYNACK);
-                return Some((FLAG_SYN | FLAG_ACK, send_seq, conn.rcv_nxt));
-            }
+        TcpState::Listen if tcp_flags & FLAG_SYN != 0 => {
+            conn.state = TcpState::SynReceived;
+            conn.rcv_nxt = seq_num.wrapping_add(1);
+            let send_seq = conn.snd_nxt;
+            conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+            inc_stat!(STAT_SENT_SYNACK);
+            return Some((FLAG_SYN | FLAG_ACK, send_seq, conn.rcv_nxt));
         }
-        TcpState::SynSent => {
-            if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 {
-                if ack_num == conn.snd_nxt {
-                    conn.state = TcpState::Established;
-                    conn.rcv_nxt = seq_num.wrapping_add(1);
-                    inc_stat!(STAT_SENT_SYNACK2);
-                    return reply!(FLAG_ACK);
-                } else {
-                    inc_stat!(STAT_SENT_RST);
-                    return Some((FLAG_RST, ack_num, 0));
-                }
-            } else if tcp_flags & FLAG_RST != 0 {
-                conn.state = TcpState::Closed;
-            }
+
+        TcpState::SynSent if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt => {
+            conn.state = TcpState::Established;
+            conn.rcv_nxt = seq_num.wrapping_add(1);
+            inc_stat!(STAT_SENT_SYNACK2);
+            return reply!(FLAG_ACK);
         }
-        TcpState::SynReceived => {
+        TcpState::SynSent if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 => {
+            inc_stat!(STAT_SENT_RST);
+            return Some((FLAG_RST, ack_num, 0));
+        }
+        TcpState::SynSent if tcp_flags & FLAG_RST != 0 => {
+            conn.state = TcpState::Closed;
+        }
+
+        TcpState::SynReceived if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt => {
+            conn.state = TcpState::Established;
+            inc_stat!(STAT_RECV_SYNACK2);
+        }
+
+        TcpState::Established if tcp_flags & FLAG_FIN != 0 => {
+            conn.state = TcpState::LastAck;
+            if seq_num == conn.rcv_nxt {
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
+            }
+            let send_seq = conn.snd_nxt;
+            conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+            inc_stat!(STAT_SENT_FIN_PSSV);
+            inc_stat!(STAT_SENT_ACK4FIN);
+            return Some((FLAG_FIN | FLAG_ACK, send_seq, conn.rcv_nxt));
+        }
+        TcpState::Established if tcp_flags & FLAG_ACK != 0 && payload_len > 0 => {
+            if seq_num == conn.rcv_nxt {
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
+            }
+            inc_stat!(STAT_SENT_ACK);
+            return reply!(FLAG_ACK);
+        }
+        TcpState::Established if tcp_flags & FLAG_ACK != 0 && seq_num == conn.rcv_nxt.wrapping_sub(1) => {
+            inc_stat!(STAT_SENT_ACK);
+            return reply!(FLAG_ACK);
+        }
+
+        TcpState::FinWait2 if tcp_flags & FLAG_FIN != 0 => {
+            conn.state = TcpState::Closed;
+            conn.rcv_nxt = seq_num.wrapping_add(1);
+            inc_stat!(STAT_SENT_ACK4FIN);
+            return reply!(FLAG_ACK);
+        }
+
+        TcpState::FinWait1 if tcp_flags & FLAG_FIN != 0 => {
+            if seq_num == conn.rcv_nxt {
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
+            }
+            inc_stat!(STAT_SENT_ACK4FIN);
+
             if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
-                conn.state = TcpState::Established;
-                inc_stat!(STAT_RECV_SYNACK2);
-            }
-        }
-        TcpState::Established => {
-            if tcp_flags & FLAG_FIN != 0 {
-                conn.state = TcpState::LastAck;
-                if seq_num == conn.rcv_nxt {
-                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
-                }
-                let send_seq = conn.snd_nxt;
-                conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-                inc_stat!(STAT_SENT_FIN_PSSV);
-                inc_stat!(STAT_SENT_ACK4FIN);
-                return Some((FLAG_FIN | FLAG_ACK, send_seq, conn.rcv_nxt));
-            } else if tcp_flags & FLAG_ACK != 0 {
-                if payload_len > 0 {
-                    if seq_num == conn.rcv_nxt {
-                        conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len);
-                    }
-                    inc_stat!(STAT_SENT_ACK);
-                    return reply!(FLAG_ACK);
-                } else if seq_num == conn.rcv_nxt.wrapping_sub(1) {
-                    inc_stat!(STAT_SENT_ACK);
-                    return reply!(FLAG_ACK);
-                }
-            }
-        }
-        TcpState::FinWait2 => {
-            if tcp_flags & FLAG_FIN != 0 {
-                conn.state = TcpState::Closed;
-                conn.rcv_nxt = seq_num.wrapping_add(1);
-                inc_stat!(STAT_SENT_ACK4FIN);
-                return reply!(FLAG_ACK);
-            }
-        }
-        TcpState::FinWait1 => {
-            if tcp_flags & FLAG_FIN != 0 {
-                if seq_num == conn.rcv_nxt {
-                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(payload_len).wrapping_add(1);
-                }
-                inc_stat!(STAT_SENT_ACK4FIN);
-                if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
-                    // Client ACKed our FIN and sent theirs simultaneously
-                    conn.state = TcpState::Closed;
-                    inc_stat!(STAT_RECV_ACK4FIN);
-                } else {
-                    conn.state = TcpState::Closing;
-                }
-                return reply!(FLAG_ACK);
-            } else if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
-                conn.state = TcpState::FinWait2;
-                inc_stat!(STAT_RECV_ACK4FIN);
-            }
-        }
-        TcpState::CloseWait => {
-            if tcp_flags & FLAG_FIN != 0 {
-                // Retransmit ACK for FIN if client missed the first pure ACK
-                inc_stat!(STAT_SENT_ACK4FIN);
-                return reply!(FLAG_ACK);
-            }
-        }
-        TcpState::Closing => {
-            if tcp_flags & FLAG_ACK != 0 {
+                // Client ACKed our FIN and sent theirs simultaneously
                 conn.state = TcpState::Closed;
                 inc_stat!(STAT_RECV_ACK4FIN);
+            } else {
+                conn.state = TcpState::Closing;
             }
+            return reply!(FLAG_ACK);
         }
-        TcpState::LastAck => {
-            if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt {
-                conn.state = TcpState::Closed;
-                inc_stat!(STAT_RECV_ACK4FIN);
-            }
+        TcpState::FinWait1 if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt => {
+            conn.state = TcpState::FinWait2;
+            inc_stat!(STAT_RECV_ACK4FIN);
         }
-        TcpState::Closed => {
-            if tcp_flags & FLAG_RST == 0 {
-                inc_stat!(STAT_SENT_RST);
-                return Some((FLAG_RST, 0, seq_num.wrapping_add(payload_len)));
-            }
+
+        TcpState::CloseWait if tcp_flags & FLAG_FIN != 0 => {
+            // Retransmit ACK for FIN if client missed the first pure ACK
+            inc_stat!(STAT_SENT_ACK4FIN);
+            return reply!(FLAG_ACK);
         }
+
+        TcpState::Closing if tcp_flags & FLAG_ACK != 0 => {
+            conn.state = TcpState::Closed;
+            inc_stat!(STAT_RECV_ACK4FIN);
+        }
+
+        TcpState::LastAck if tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt => {
+            conn.state = TcpState::Closed;
+            inc_stat!(STAT_RECV_ACK4FIN);
+        }
+
+        TcpState::Closed if tcp_flags & FLAG_RST == 0 => {
+            inc_stat!(STAT_SENT_RST);
+            return Some((FLAG_RST, 0, seq_num.wrapping_add(payload_len)));
+        }
+
         _ => {}
     }
 

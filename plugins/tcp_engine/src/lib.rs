@@ -158,8 +158,7 @@ impl Guest for TcpEngine {
     // - If the initialization is successful, the plugin will be ready to process batches.
     fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency: u64) -> bool {
         init_logging();
-        let mut config = EngineConfig::default();
-        config.bypass = false;
+        let mut config = EngineConfig { bypass: false, ..Default::default() };
 
         let mut raw_src_ip: Option<alloc::string::String> = None;
 
@@ -319,36 +318,40 @@ impl Guest for TcpEngine {
                                 conn.state = TcpState::FinWait1;
                                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                             }
-                            l = write_tcp_reply(
-                                data_ptr,
-                                reply_src_mac,
-                                reply_dst_mac,
-                                flow_key.2,
-                                flow_key.3,
-                                flow_key.0,
-                                flow_key.1,
-                                snd_nxt,
-                                rcv_nxt,
-                                FLAG_FIN | FLAG_ACK,
-                            );
+                            unsafe {
+                                l = write_tcp_reply(
+                                    data_ptr,
+                                    reply_src_mac,
+                                    reply_dst_mac,
+                                    flow_key.2,
+                                    flow_key.3,
+                                    flow_key.0,
+                                    flow_key.1,
+                                    snd_nxt,
+                                    rcv_nxt,
+                                    FLAG_FIN | FLAG_ACK,
+                                );
+                            }
                             inc_stat!(STAT_SENT_FIN);
                             a = ROUTE_TX;
                             generated_reply = true;
                         } else {
                             pool.remove(&flow_key);
                             inc_stat!(STAT_SENT_RST);
-                            l = write_tcp_reply(
-                                data_ptr,
-                                reply_src_mac,
-                                reply_dst_mac,
-                                flow_key.2,
-                                flow_key.3,
-                                flow_key.0,
-                                flow_key.1,
-                                snd_nxt,
-                                rcv_nxt,
-                                FLAG_RST | FLAG_ACK,
-                            );
+                            unsafe {
+                                l = write_tcp_reply(
+                                    data_ptr,
+                                    reply_src_mac,
+                                    reply_dst_mac,
+                                    flow_key.2,
+                                    flow_key.3,
+                                    flow_key.0,
+                                    flow_key.1,
+                                    snd_nxt,
+                                    rcv_nxt,
+                                    FLAG_RST | FLAG_ACK,
+                                );
+                            }
                             a = ROUTE_TX;
                             generated_reply = true;
                         }
@@ -380,7 +383,7 @@ impl Guest for TcpEngine {
                                 u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
                             let our_ip = base_ip.wrapping_add(gen.ip_offset);
 
-                            if gen.port_counter >= PORT_END_RANGE {
+                            if gen.port_counter == PORT_END_RANGE {
                                 gen.port_counter = PORT_START_RANGE;
                                 gen.ip_offset = (gen.ip_offset + 1) % 250;
                             } else {
@@ -403,18 +406,20 @@ impl Guest for TcpEngine {
                             let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                             let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
-                            l = write_tcp_reply(
-                                data_ptr,
-                                reply_src_mac,
-                                reply_dst_mac,
-                                our_ip,
-                                src_port,
-                                their_ip,
-                                dst_port,
-                                isn,
-                                0,
-                                FLAG_SYN,
-                            );
+                            unsafe {
+                                l = write_tcp_reply(
+                                    data_ptr,
+                                    reply_src_mac,
+                                    reply_dst_mac,
+                                    our_ip,
+                                    src_port,
+                                    their_ip,
+                                    dst_port,
+                                    isn,
+                                    0,
+                                    FLAG_SYN,
+                                );
+                            }
                             inc_stat!(STAT_SENT_SYN);
                             a = ROUTE_TX;
                             generated_reply = true;
@@ -432,8 +437,8 @@ impl Guest for TcpEngine {
             } else {
                 //packet.parse_fast();  // is already done within the DAG by FastParser Node
                 if packet.fingerprint() == Packet::TCP_OVER_IPV4 {
-                    let mut p = packet.as_packet();
-                    handle_tcp_packet(&mut p, pool, &local_config)
+                    let p = packet.as_packet();
+                    unsafe { handle_tcp_packet(p, pool, &local_config) }
                 } else {
                     inc_stat!(STAT_TO_LINUX);
                     (ROUTE_LINUX, packet.data_len())
@@ -710,7 +715,7 @@ fn flush_state(mode: u8) {
 }
 
 /// Extracts protocol data, runs the state machine, and formats replies
-fn handle_tcp_packet(
+unsafe fn handle_tcp_packet(
     packet: &mut Packet,
     pool: &mut ConnectionPool,
     config: &EngineConfig,

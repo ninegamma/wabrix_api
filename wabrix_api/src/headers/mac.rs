@@ -75,9 +75,7 @@ impl MacHeader {
 
     #[inline]
     pub fn swap_addresses(&mut self) {
-        let src: MacAddress = self.src;
-        self.src = self.dst;
-        self.dst = src;
+        core::mem::swap(&mut self.src, &mut self.dst);
     }
 
     pub fn set_dmac(&mut self, dmac: &MacAddress) {

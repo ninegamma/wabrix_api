@@ -66,21 +66,20 @@ pub enum HeaderPtr {
 // Keep initialization ergonomics
 impl HeaderPtr {
     #[inline]
-    pub fn new<T: EndOffset>(ptr: *mut T) -> HeaderPtr {
-        // SAFETY: `ptr` must be a valid, properly aligned pointer to a `T` that lives at
-        // least as long as the returned `HeaderPtr`. Callers uphold this by passing pointers
-        // derived from live UMEM frame references during packet parsing.
-        unsafe {
-            match (*ptr).header_kind() {
-                HeaderKind::Null => HeaderPtr::Null,
-                HeaderKind::Mac => HeaderPtr::Mac(ptr as *mut MacHeader),
-                HeaderKind::Ip => HeaderPtr::Ip(ptr as *mut IpHeader),
-                HeaderKind::Ipv6 => HeaderPtr::Ipv6(ptr as *mut Ipv6Header),
-                HeaderKind::Tcp => HeaderPtr::Tcp(ptr as *mut TcpHeader),
-                HeaderKind::Udp => HeaderPtr::Udp(ptr as *mut UdpHeader),
-                HeaderKind::Icmp => HeaderPtr::Icmp(ptr as *mut IcmpHeader),
-                HeaderKind::ArpIpv4 => HeaderPtr::ArpIpv4(ptr as *mut ArpIpv4Header),
-            }
+    /// # Safety
+    /// `ptr` must be a valid, properly aligned pointer to a `T` that lives at
+    /// least as long as the returned `HeaderPtr`. Callers uphold this by passing pointers
+    /// derived from live UMEM frame references during packet parsing.
+    pub unsafe fn new<T: EndOffset>(ptr: *mut T) -> HeaderPtr {
+        match (*ptr).header_kind() {
+            HeaderKind::Null => HeaderPtr::Null,
+            HeaderKind::Mac => HeaderPtr::Mac(ptr as *mut MacHeader),
+            HeaderKind::Ip => HeaderPtr::Ip(ptr as *mut IpHeader),
+            HeaderKind::Ipv6 => HeaderPtr::Ipv6(ptr as *mut Ipv6Header),
+            HeaderKind::Tcp => HeaderPtr::Tcp(ptr as *mut TcpHeader),
+            HeaderKind::Udp => HeaderPtr::Udp(ptr as *mut UdpHeader),
+            HeaderKind::Icmp => HeaderPtr::Icmp(ptr as *mut IcmpHeader),
+            HeaderKind::ArpIpv4 => HeaderPtr::ArpIpv4(ptr as *mut ArpIpv4Header),
         }
     }
 

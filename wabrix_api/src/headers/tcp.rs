@@ -30,9 +30,7 @@ macro_rules! write_or_return {
     ($dst: expr, $($arg:tt)*) => {
         {
             let result = write!($dst, $($arg)*);
-            if result.is_err() {
-                return result;
-            }
+            result?
         }
     }
 }
@@ -49,9 +47,7 @@ impl fmt::Display for TcpHeader {
             self.data_offset()
         );
         let ret = self.fmt_flags(f);
-        if ret.is_err() {
-            return ret;
-        }
+        ret?;
         write!(
             f,
             "cwnd {} csum {} urgent {}",

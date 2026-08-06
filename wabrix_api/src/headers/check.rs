@@ -32,7 +32,6 @@ DEALINGS IN THE SOFTWARE.
 
 /// Represents an unsigned 16-bit integer. libpnet #[packet]-derived structs using this type will
 /// hold it in memory as big-endian, but accessors/mutators will return/take host-order values.
-
 pub type u16be = u16;
 
 /// Sum all words (16 bit chunks) in the given data. The word at word offset
@@ -42,16 +41,14 @@ use core::slice;
 fn sum_be_words(data: &[u8], skipword: usize) -> u32 {
     // Process 16-bit big-endian words without assuming alignment of `data`.
     let mut sum = 0u32;
-    let mut i = 0usize;
 
     let mut chunks = data.chunks_exact(2);
-    while let Some(chunk) = chunks.next() {
+    for (i, chunk) in chunks.by_ref().enumerate(){
         if i != skipword {
             // chunk has length 2
             let word = u16::from_be_bytes([chunk[0], chunk[1]]);
             sum += word as u32;
         }
-        i += 1;
     }
 
     // If the length is odd, make sure to checksum the final byte
@@ -128,7 +125,6 @@ pub fn update_checksum_incremental(
     old_data_csum: u16,
     new_data_csum: u16,
 ) -> u16be {
-    let tmp: u32;
-    tmp = (!old_check) as u32 + (!old_data_csum) as u32 + new_data_csum as u32;
+    let tmp = (!old_check) as u32 + (!old_data_csum) as u32 + new_data_csum as u32;
     finalize_checksum(tmp)
 }
