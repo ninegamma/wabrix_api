@@ -2,7 +2,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 # Wabrix API
 
-**Wabrix API** provides the Rust bindings, traits, and SDK necessary to develop independent WebAssembly (Wasm) plugins for the [Wabrix Data Plane Engine](https://github.com/ninegamma/wabrix/blob/main/README.md).
+**Wabrix API** provides the Rust bindings, traits, and SDK necessary to develop independent WebAssembly (Wasm) plugins for the [Wabrix Data Plane Engine](https://github.com/ninegamma/wabrix/blob/master/README.md).
 
 Because Wabrix executes plugins as isolated, programmable execution units within its packet processing pipeline, this API allows developers to write custom network functions, telemetry extractors, and protocol parsers without modifying the core engine.
 
