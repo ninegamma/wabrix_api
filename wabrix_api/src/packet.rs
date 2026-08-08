@@ -1,301 +1,275 @@
-use crate::exports::Pdu0;
 use crate::headers::{
     ArpIpv4Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader,
 };
 use crate::hstack::HeaderStack;
-use core::slice;
+use crate::umem;
+use core::marker::PhantomData;
 
-/// The safe, high-level interface for a single packet.
+const HEADER_STACK_OFFSET: u32 = 0;
+const DESC_ADDR_OFFSET: u32 = 16;
+const DESC_LEN_OFFSET: u32 = 24;
+const FRAME_SIZE_LOG2_OFFSET: u32 = 36;
+
+/// Offset-backed packet view. UMEM values are copied only into fixed-size stack values.
 pub struct Packet<'a> {
-    pdu: &'a mut Pdu0,
-    umem_base: usize,
+    pdu_offset: u32,
+    heap_backed: bool,
+    _exclusive: PhantomData<&'a mut ()>,
 }
 
 impl<'a> Packet<'a> {
-    /// if headers().fingerprint() == TCP_OVER_IPV4 { ... }
     pub const TCP_OVER_IPV4: u32 =
         (HeaderKind::Mac as u32) | ((HeaderKind::Ip as u32) << 4) | ((HeaderKind::Tcp as u32) << 8);
 
-    /// Internal constructor.
     #[inline(always)]
-    pub fn new(pdu: &'a mut Pdu0, umem_base: usize) -> Self {
-        Self { pdu, umem_base }
-    }
-
-    // Now, all API methods drop the `umem_addr` parameter!
-
-    #[inline]
-    pub fn parse_fast(&mut self) -> usize {
-        self.pdu.parse_fast(self.umem_base)
-    }
-
-    #[inline]
-    pub fn data(&self) -> &[u8] {
-        // SAFETY: `data_ptr` returns `umem_base + desc_addr`, a pointer into the WASM linear
-        // memory region backing this packet. `data_len()` is the byte count set by the host
-        // and is guaranteed to fit within the frame. The slice lifetime is tied to `&self`,
-        // so no mutable alias to the same region can exist concurrently.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.pdu.data_ptr(self.umem_base),
-                self.pdu.data_len() as usize,
-            )
+    pub(crate) fn from_offset(pdu_offset: u32) -> Self {
+        Self {
+            pdu_offset,
+            heap_backed: false,
+            _exclusive: PhantomData,
         }
     }
 
-    pub fn headroom(&self) -> usize {
-        self.pdu.headroom()
-    }
-
-    #[inline]
-    pub fn headers(&self) -> &HeaderStack {
-        &self.pdu.header_stack
-    }
-
-    /// Pushes a new header. Returns Result to allow graceful error handling.
-    pub fn push_header<T: Copy>(&mut self, header: &T) -> anyhow::Result<&mut Self> {
-        self.pdu.push_header(self.umem_base, header)?;
-        Ok(self)
-    }
-
-    /// Truncates or expands the packet payload
-    pub fn resize_payload(&mut self, new_len: u32) -> &mut Self {
-        self.pdu.set_data_length(new_len);
-        self
+    #[inline(always)]
+    fn read_pdu<T: Copy>(&self, field_offset: u32) -> T {
+        // SAFETY: `pdu_offset` identifies an initialized mailbox PDU and every caller uses
+        // a field offset and type matching the stable `Pdu0`/`WPdu` C layout.
+        unsafe {
+            let offset = self.pdu_offset + field_offset;
+            if self.heap_backed {
+                (offset as usize as *const T).read_unaligned()
+            } else {
+                umem::read(offset)
+            }
+        }
     }
 
     #[inline(always)]
-    pub fn is_a_tick(&self) -> bool {
-        self.pdu.is_a_tick(self.umem_base)
+    fn write_pdu<T: Copy>(&mut self, field_offset: u32, value: &T) {
+        // SAFETY: This packet exclusively owns its mailbox slot for `'a`.
+        unsafe {
+            let offset = self.pdu_offset + field_offset;
+            if self.heap_backed {
+                (offset as usize as *mut T).write_unaligned(*value)
+            } else {
+                umem::write(offset, value)
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn desc_addr(&self) -> u64 {
+        self.read_pdu(DESC_ADDR_OFFSET)
+    }
+
+    #[inline(always)]
+    fn frame_size_log2(&self) -> u8 {
+        self.read_pdu(FRAME_SIZE_LOG2_OFFSET)
+    }
+
+    #[inline(always)]
+    fn frame_base(&self) -> u32 {
+        let log2 = self.frame_size_log2();
+        (self.desc_addr() & !((1u64 << log2) - 1)) as u32
+    }
+
+    #[inline(always)]
+    fn header_stack_value(&self) -> HeaderStack {
+        self.read_pdu(HEADER_STACK_OFFSET)
+    }
+
+    #[inline(always)]
+    fn header_offset(&self, kind: HeaderKind, reverse: bool) -> Option<u32> {
+        let stack = self.header_stack_value();
+        if reverse {
+            (0..stack.count())
+                .rev()
+                .find(|&i| stack.kinds[i] == kind)
+                .map(|i| self.frame_base() + stack.offsets[i] as u32)
+        } else {
+            (0..stack.count())
+                .find(|&i| stack.kinds[i] == kind)
+                .map(|i| self.frame_base() + stack.offsets[i] as u32)
+        }
+    }
+
+    #[inline(always)]
+    fn read_header<T: Copy>(&self, kind: HeaderKind, reverse: bool) -> Option<T> {
+        let offset = self.header_offset(kind, reverse)?;
+        // SAFETY: HeaderStack was populated by the host parser and identifies a complete header.
+        Some(unsafe {
+            if self.heap_backed {
+                (offset as usize as *const T).read_unaligned()
+            } else {
+                umem::read(offset)
+            }
+        })
+    }
+
+    #[inline(always)]
+    fn write_header<T: Copy>(&mut self, kind: HeaderKind, reverse: bool, value: &T) -> bool {
+        let Some(offset) = self.header_offset(kind, reverse) else {
+            return false;
+        };
+        // SAFETY: The header offset and type correspond to `kind`; this packet is exclusive.
+        unsafe {
+            if self.heap_backed {
+                (offset as usize as *mut T).write_unaligned(*value)
+            } else {
+                umem::write(offset, value)
+            }
+        };
+        true
+    }
+
+    #[inline(always)]
+    pub fn headers(&self) -> HeaderStack {
+        self.header_stack_value()
+    }
+
+    #[inline(always)]
+    pub fn fingerprint(&self) -> u32 {
+        self.header_stack_value().fingerprint()
     }
 
     #[inline(always)]
     pub fn data_len(&self) -> u32 {
-        self.pdu.data_len()
-    }
-
-    /// Provides a mutable pointer to the raw payload for zero-copy rewriting
-    #[inline(always)]
-    pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        self.pdu.data_ptr(self.umem_base)
+        self.read_pdu(DESC_LEN_OFFSET)
     }
 
     #[inline(always)]
-    pub fn data_ptr(&self) -> *const u8 {
-        self.pdu.data_ptr(self.umem_base)
+    pub fn resize_payload(&mut self, new_len: u32) -> &mut Self {
+        self.write_pdu(DESC_LEN_OFFSET, &new_len);
+        self
     }
 
-    // =================================================================
-    // FAST-PATH PROTOCOL MATCHING
-    // =================================================================
-
-    /// Exposes your ultra-fast fingerprinting for instant protocol matching
     #[inline(always)]
-    pub fn fingerprint(&self) -> u32 {
-        self.pdu.header_stack.fingerprint()
+    pub fn headroom(&self) -> usize {
+        (self.desc_addr() as u32 - self.frame_base()) as usize
     }
 
-    // =================================================================
-    // SAFE IMMUTABLE ACCESSORS
-    // =================================================================
-
-    /// Returns a typed reference to the TCP header if it exists
-    #[inline]
-    pub fn tcp_header(&self) -> Option<&TcpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-
-        // Iterate backwards: L4 headers are usually at the top of the stack
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Tcp {
-                return Some(stack.tcp(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a typed reference to the IPv4 header if it exists
-    #[inline]
-    pub fn ipv4_header(&self) -> Option<&IpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ip {
-                return Some(stack.ip(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a typed reference to the MAC header if it exists
-    #[inline]
-    pub fn mac_header(&self) -> Option<&MacHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        for i in 0..self.pdu.header_stack.count() {
-            if self.pdu.header_stack.kinds[i] == HeaderKind::Mac {
-                return Some(self.pdu.header_stack.mac(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a typed reference to the UDP header if it exists
-    #[inline]
-    pub fn udp_header(&self) -> Option<&UdpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        for i in (0..self.pdu.header_stack.count()).rev() {
-            if self.pdu.header_stack.kinds[i] == HeaderKind::Udp {
-                return Some(self.pdu.header_stack.udp(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a typed reference to the ARP header if it exists
-    #[inline]
-    pub fn arp_header(&self) -> Option<&ArpIpv4Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::ArpIpv4 {
-                return Some(stack.arp(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a typed reference to the IPv6 header if it exists
-    #[inline]
-    pub fn ipv6_header(&self) -> Option<&Ipv6Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ipv6 {
-                return Some(stack.ipv6(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a typed reference to the ICMP header if it exists
-    #[inline]
-    pub fn icmp_header(&self) -> Option<&IcmpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Icmp {
-                return Some(stack.icmp(base, i));
-            }
-        }
-        None
-    }
-
-    // =================================================================
-    // SAFE MUTABLE ACCESSORS
-    // =================================================================
-
-    /// Returns a mutable typed reference to the TCP header
-    #[inline]
-    pub fn tcp_header_mut(&mut self) -> Option<&mut TcpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Tcp {
-                return Some(stack.tcp_mut(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a mutable typed reference to the IPv4 header
-    #[inline]
-    pub fn ipv4_header_mut(&mut self) -> Option<&mut IpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ip {
-                return Some(stack.ip_mut(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a mutable typed reference to the MAC header
-    #[inline]
-    pub fn mac_header_mut(&mut self) -> Option<&mut MacHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Mac {
-                return Some(stack.mac_mut(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a mutable typed reference to the ARP header
-    #[inline]
-    pub fn arp_header_mut(&mut self) -> Option<&mut ArpIpv4Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::ArpIpv4 {
-                return Some(stack.arp_mut(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a mutable typed reference to the IPv6 header
-    #[inline]
-    pub fn ipv6_header_mut(&mut self) -> Option<&mut Ipv6Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ipv6 {
-                return Some(stack.ipv6_mut(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a mutable typed reference to the UDP header
-    #[inline]
-    pub fn udp_header_mut(&mut self) -> Option<&mut UdpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Udp {
-                return Some(stack.udp_mut(base, i));
-            }
-        }
-        None
-    }
-
-    /// Returns a mutable typed reference to the ICMP header
-    #[inline]
-    pub fn icmp_header_mut(&mut self) -> Option<&mut IcmpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Icmp {
-                return Some(stack.icmp_mut(base, i));
-            }
-        }
-        None
-    }
-
-    #[inline]
-    pub fn payload(&self) -> Option<&[u8]> {
-        self.pdu.payload(self.umem_base)
-    }
-
-    /// Serializes fully formed MAC, IPv4, and TCP headers into Wasm linear memory.
-    /// Returns the total length of the written headers.
     #[inline(always)]
+    pub fn is_a_tick(&self) -> bool {
+        if self.data_len() < core::mem::size_of::<MacHeader>() as u32 {
+            return false;
+        }
+
+        let offset = self.desc_addr() as u32;
+        // Tick PDUs do not pass through FastParserNode, so their HeaderStack is empty.
+        // Read the Ethernet header directly from the frame, matching WPdu::is_a_tick().
+        let mac = unsafe {
+            if self.heap_backed {
+                (offset as usize as *const MacHeader).read_unaligned()
+            } else {
+                umem::read(offset)
+            }
+        };
+        mac.etype() == 0x88B5
+    }
+
+    pub fn mac_header(&self) -> Option<MacHeader> {
+        self.read_header(HeaderKind::Mac, false)
+    }
+    pub fn ipv4_header(&self) -> Option<IpHeader> {
+        self.read_header(HeaderKind::Ip, false)
+    }
+    pub fn ipv6_header(&self) -> Option<Ipv6Header> {
+        self.read_header(HeaderKind::Ipv6, false)
+    }
+    pub fn tcp_header(&self) -> Option<TcpHeader> {
+        self.read_header(HeaderKind::Tcp, true)
+    }
+    pub fn udp_header(&self) -> Option<UdpHeader> {
+        self.read_header(HeaderKind::Udp, true)
+    }
+    pub fn icmp_header(&self) -> Option<IcmpHeader> {
+        self.read_header(HeaderKind::Icmp, true)
+    }
+    pub fn arp_header(&self) -> Option<ArpIpv4Header> {
+        self.read_header(HeaderKind::ArpIpv4, false)
+    }
+
+    pub fn write_mac_header(&mut self, value: &MacHeader) -> bool {
+        self.write_header(HeaderKind::Mac, false, value)
+    }
+    pub fn write_ipv4_header(&mut self, value: &IpHeader) -> bool {
+        self.write_header(HeaderKind::Ip, false, value)
+    }
+    pub fn write_ipv6_header(&mut self, value: &Ipv6Header) -> bool {
+        self.write_header(HeaderKind::Ipv6, false, value)
+    }
+    pub fn write_tcp_header(&mut self, value: &TcpHeader) -> bool {
+        self.write_header(HeaderKind::Tcp, true, value)
+    }
+    pub fn write_udp_header(&mut self, value: &UdpHeader) -> bool {
+        self.write_header(HeaderKind::Udp, true, value)
+    }
+    pub fn write_icmp_header(&mut self, value: &IcmpHeader) -> bool {
+        self.write_header(HeaderKind::Icmp, true, value)
+    }
+    pub fn write_arp_header(&mut self, value: &ArpIpv4Header) -> bool {
+        self.write_header(HeaderKind::ArpIpv4, false, value)
+    }
+
+    #[inline(always)]
+    pub fn write_bytes(&mut self, relative_offset: u32, bytes: &[u8]) {
+        // SAFETY: The caller supplies bytes within the frame; source is a live Memory-0 slice.
+        unsafe {
+            let offset = self.desc_addr() as u32 + relative_offset;
+            if self.heap_backed {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    offset as usize as *mut u8,
+                    bytes.len(),
+                )
+            } else {
+                umem::copy_to(offset, bytes.as_ptr(), bytes.len())
+            }
+        }
+    }
+
+    pub fn contains(&self, needle: &[u8]) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        let len = self.data_len() as usize;
+        if needle.len() > len {
+            return false;
+        }
+        let mut window = [0u8; 256];
+        if needle.len() > window.len() {
+            return false;
+        }
+        let mut offset = 0usize;
+        while offset < len {
+            let overlap = needle.len().saturating_sub(1);
+            let count = core::cmp::min(window.len(), len - offset);
+            unsafe {
+                let src = self.desc_addr() as u32 + offset as u32;
+                if self.heap_backed {
+                    core::ptr::copy_nonoverlapping(
+                        src as usize as *const u8,
+                        window.as_mut_ptr(),
+                        count,
+                    )
+                } else {
+                    umem::copy_from(window.as_mut_ptr(), src, count)
+                }
+            }
+            if window[..count]
+                .windows(needle.len())
+                .any(|part| part == needle)
+            {
+                return true;
+            }
+            if count == len - offset {
+                break;
+            }
+            offset += count - overlap;
+        }
+        false
+    }
+
     pub fn write_tcp_ipv4_headers(
         &mut self,
         mac: &MacHeader,
@@ -304,97 +278,81 @@ impl<'a> Packet<'a> {
     ) -> u32 {
         let mac_len = core::mem::size_of::<MacHeader>();
         let ip_len = core::mem::size_of::<IpHeader>();
-        let tcp_len = core::mem::size_of::<TcpHeader>();
-
-        let ptr = self.pdu.data_ptr(self.umem_base);
-        // SAFETY: `ptr` points to the start of the frame's data region in WASM linear memory.
-        // `frame_size()` is the pre-allocated frame capacity (a power-of-2 byte count) and is
-        // always larger than the combined header sizes written below. `&mut self` ensures no
-        // other reference to this frame exists concurrently.
-        let data = unsafe { core::slice::from_raw_parts_mut(ptr, self.pdu.frame_size()) };
-
-        // SAFETY: `mac`, `ip`, and `tcp` are valid references to `#[repr(C)]` Copy types on
-        // the caller's stack. Casting them to `*const u8` and reading `size_of::<T>()` bytes
-        // is sound because all bit patterns are valid for byte slices. The source and destination
-        // slices do not overlap (stack locals vs. WASM linear memory).
-        unsafe {
-            let mac_bytes = core::slice::from_raw_parts(mac as *const _ as *const u8, mac_len);
-            let ip_bytes = core::slice::from_raw_parts(ip as *const _ as *const u8, ip_len);
-            let tcp_bytes = core::slice::from_raw_parts(tcp as *const _ as *const u8, tcp_len);
-
-            data[0..mac_len].copy_from_slice(mac_bytes);
-            data[mac_len..mac_len + ip_len].copy_from_slice(ip_bytes);
-            data[mac_len + ip_len..mac_len + ip_len + tcp_len].copy_from_slice(tcp_bytes);
-        }
-
-        (mac_len + ip_len + tcp_len) as u32
+        self.write_bytes(0, unsafe {
+            core::slice::from_raw_parts(mac as *const _ as *const u8, mac_len)
+        });
+        self.write_bytes(mac_len as u32, unsafe {
+            core::slice::from_raw_parts(ip as *const _ as *const u8, ip_len)
+        });
+        self.write_bytes((mac_len + ip_len) as u32, unsafe {
+            core::slice::from_raw_parts(
+                tcp as *const _ as *const u8,
+                core::mem::size_of::<TcpHeader>(),
+            )
+        });
+        (mac_len + ip_len + core::mem::size_of::<TcpHeader>()) as u32
     }
 }
 
-/// A safe, zero-cost wrapper around the raw linear memory passed to Wasm.
 pub struct PacketBatch<'a> {
-    pub(crate) pdus: &'a mut [Pdu0],
-    pub(crate) umem_base: usize,
+    pdu_base: u32,
+    len: usize,
+    heap_backed: bool,
+    _exclusive: PhantomData<&'a mut ()>,
 }
-
-const _: () = assert!(size_of::<Pdu0>() == 64);
 
 impl<'a> PacketBatch<'a> {
-    /// Safely constructs the batch from the raw Wasm inputs.
-    /// Hides the pointer casting and 2's complement math from the user.
-    #[inline(always)]
-    pub fn new(batch_bytes: &'a mut [u8], partition_offset: u32) -> Self {
-        // SAFETY: `batch_bytes` is a `&mut [u8]` owned by the caller for lifetime `'a`, so the
-        // pointer is valid and exclusively held. The host ABI guarantees the buffer contains a
-        // contiguous array of packed `Pdu0` structs. `Pdu0` is `#[repr(C, align(64))]`; the
-        // count is rounded down to whole structs, so we never read past the slice end. The
-        // caller must ensure the buffer is 64-byte aligned (guaranteed by the WASM host ABI).
-        let pdus = unsafe {
-            slice::from_raw_parts_mut(
-                batch_bytes.as_mut_ptr() as *mut Pdu0,
-                batch_bytes.len() / core::mem::size_of::<Pdu0>(),
-            )
-        };
-
-        // Calculate the virtual UMEM address for this sandbox
-        let umem_base = (0u32).wrapping_sub(partition_offset) as usize;
-
-        Self { pdus, umem_base }
+    pub fn new(batch_bytes: &'a mut [u8]) -> Self {
+        Self {
+            pdu_base: batch_bytes.as_mut_ptr() as usize as u32,
+            len: batch_bytes.len() / 64,
+            heap_backed: true,
+            _exclusive: PhantomData,
+        }
     }
-
-    /// Returns the number of packets in this batch
     #[inline(always)]
+    pub(crate) unsafe fn from_packet_memory(batch_size: usize, pdu_offset: u32) -> Self {
+        Self {
+            pdu_base: pdu_offset,
+            len: batch_size,
+            heap_backed: false,
+            _exclusive: PhantomData,
+        }
+    }
     pub fn len(&self) -> usize {
-        self.pdus.len()
+        self.len
     }
-
-    #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        self.pdus.is_empty()
+        self.len == 0
     }
-
-    /// Creates a zero-cost iterator that yields safe `Packet` wrappers
-    #[inline(always)]
     pub fn iter_mut(&mut self) -> PacketBatchIter<'_> {
         PacketBatchIter {
-            iter: self.pdus.iter_mut(),
-            umem_base: self.umem_base,
+            next_offset: self.pdu_base,
+            remaining: self.len,
+            heap_backed: self.heap_backed,
+            _exclusive: PhantomData,
         }
     }
 }
 
-/// The Iterator that instantiates `Packet` wrappers on the fly
 pub struct PacketBatchIter<'a> {
-    iter: core::slice::IterMut<'a, Pdu0>,
-    umem_base: usize,
+    next_offset: u32,
+    remaining: usize,
+    heap_backed: bool,
+    _exclusive: PhantomData<&'a mut ()>,
 }
 
 impl<'a> Iterator for PacketBatchIter<'a> {
     type Item = Packet<'a>;
-
-    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        // As we iterate over the raw WPdus, we wrap them in the safe Packet context!
-        self.iter.next().map(|pdu| Packet::new(pdu, self.umem_base))
+        if self.remaining == 0 {
+            return None;
+        }
+        let offset = self.next_offset;
+        self.next_offset += core::mem::size_of::<crate::exports::Pdu0>() as u32;
+        self.remaining -= 1;
+        let mut packet = Packet::from_offset(offset);
+        packet.heap_backed = self.heap_backed;
+        Some(packet)
     }
 }

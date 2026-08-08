@@ -103,8 +103,8 @@ impl Guest for MyGenerator {
         }
     }
 
-    fn generate_batch(mut batch_bytes: Vec<u8>, partition_offset: u32) -> Vec<u32> {
-        let mut batch = PacketBatch::new(&mut batch_bytes, partition_offset);
+    fn generate_batch(mut batch_bytes: Vec<u8>) -> Vec<u32> {
+        let mut batch = PacketBatch::new(&mut batch_bytes);
 
         let worker_id = WORKER_ID.load(Ordering::Relaxed) as u16;
         let mut seq = SEQ_COUNTER.load(Ordering::Relaxed);

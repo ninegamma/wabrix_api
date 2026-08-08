@@ -73,7 +73,6 @@ impl<T> WasmValue<T> {
     }
 }
 
-
 static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<TimeoutStack> = WasmCell::new(TimeoutStack::new());
@@ -156,9 +155,15 @@ impl Guest for TcpEngine {
     // - The init_data function should also set the tsc_frequency value in the EngineConfig struct.
     // - The init_data function returns a boolean value indicating whether the initialization was successful.
     // - If the initialization is successful, the plugin will be ready to process batches.
-    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency: u64) -> bool {
+    fn init_data(
+        data: Vec<(alloc::string::String, alloc::string::String)>,
+        tsc_frequency: u64,
+    ) -> bool {
         init_logging();
-        let mut config = EngineConfig { bypass: false, ..Default::default() };
+        let mut config = EngineConfig {
+            bypass: false,
+            ..Default::default()
+        };
 
         let mut raw_src_ip: Option<alloc::string::String> = None;
 
@@ -245,13 +250,9 @@ impl Guest for TcpEngine {
         true
     }
 
-    fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
-        log::trace!(
-            "process_batch: batch_size={}, partition_offset={}",
-            batch_size,
-            partition_offset
-        );
-        let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+    fn process_batch(batch_size: u32, mailbox_offset: u32) -> u32 {
+        log::trace!("process_batch: batch_size={}", batch_size,);
+        let mut batch = MailboxBatch::new(batch_size, mailbox_offset);
         let local_config = CONFIG.borrow().clone().unwrap_or_default();
         let mut processed_count = 0;
 
@@ -283,7 +284,7 @@ impl Guest for TcpEngine {
         };
 
         for mut packet in batch.iter_mut() {
-            let (action, _len) = if packet.is_a_tick() {
+            let (action, new_len) = if packet.is_a_tick() {
                 log::trace!("process_batch: tick");
                 let mut a = ROUTE_DROP;
                 let mut l = 64u32;
@@ -309,7 +310,6 @@ impl Guest for TcpEngine {
                         };
 
                     if exists {
-                        let data_ptr = packet.data_ptr_mut();
                         let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                         let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
@@ -318,9 +318,9 @@ impl Guest for TcpEngine {
                                 conn.state = TcpState::FinWait1;
                                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                             }
-                            unsafe {
+                            {
                                 l = write_tcp_reply(
-                                    data_ptr,
+                                    &mut packet,
                                     reply_src_mac,
                                     reply_dst_mac,
                                     flow_key.2,
@@ -338,9 +338,9 @@ impl Guest for TcpEngine {
                         } else {
                             pool.remove(&flow_key);
                             inc_stat!(STAT_SENT_RST);
-                            unsafe {
+                            {
                                 l = write_tcp_reply(
-                                    data_ptr,
+                                    &mut packet,
                                     reply_src_mac,
                                     reply_dst_mac,
                                     flow_key.2,
@@ -402,13 +402,12 @@ impl Guest for TcpEngine {
                                 CURRENT_TSC.get(),
                             );
 
-                            let data_ptr = packet.data_ptr_mut();
                             let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                             let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
-                            unsafe {
+                            {
                                 l = write_tcp_reply(
-                                    data_ptr,
+                                    &mut packet,
                                     reply_src_mac,
                                     reply_dst_mac,
                                     our_ip,
@@ -444,6 +443,7 @@ impl Guest for TcpEngine {
                     (ROUTE_LINUX, packet.data_len())
                 }
             };
+            packet.resize_payload(new_len);
             packet.set_action(action);
             processed_count += 1;
         }
@@ -568,7 +568,6 @@ impl Guest for TcpEngine {
             }
             PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
                 if let Ok(data) = postcard::from_bytes::<HotWasmPayload>(&payload) {
-
                     // Parse phase: validate all inputs before mutating state to ensure atomic updates
                     let parsed_syn_rate = match data.updates.get("syn_rate") {
                         Some(s) if s.is_empty() => Some(None),
@@ -823,12 +822,11 @@ unsafe fn handle_tcp_packet(
     }
 
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
-        let data_ptr = packet.data_ptr_mut();
         let reply_dst_mac = incoming_src_mac;
         let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
 
         let len = write_tcp_reply(
-            data_ptr,
+            packet,
             reply_src_mac,
             reply_dst_mac,
             dst_ip,

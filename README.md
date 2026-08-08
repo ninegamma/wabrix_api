@@ -29,12 +29,13 @@ First, ensure the target is installed on your local toolchain:
 rustup target add wasm32-wasip2
 ```
 
-Next, compile your plugin:
+Next, build and compose the plugins with the UMEM adapter:
 ```bash
-cargo build --target wasm32-wasip2 --release
+bash tools/build_components.sh
 ```
 
-The resulting `.wasm` file will be located at `target/wasm32-wasip2/release/my_wabrix_plugin.wasm` and is ready to be loaded via your Wabrix TOML configuration.
+The loadable components are written to `target/wasm32-wasip2/release/*.wasm`. The corresponding
+uncomposed Rust core modules are retained as `*.core.wasm` for inspection.
 
 ## 🛠 Architecture
 

@@ -8,7 +8,7 @@ interface packet-engine {
     /// Zero-copy batch processing via the shared UMEM mailbox.
     /// The host writes desc_addrs/lengths into the mailbox before calling; the plugin
     /// writes actions/new_lengths into the same mailbox and returns a status code (0 = OK).
-    process-batch: func(batch-size: u32, partition-offset: u32, mailbox-offset: u32) -> u32;
+    process-batch: func(batch-size: u32, mailbox-offset: u32) -> u32;
 
     /// Process timers and return the number of frames that are needed for the timeouts
     process-timers: func(current-tsc: u64) -> u32;
@@ -37,7 +37,7 @@ interface generator {
     set-dst: func(mac: mac-addr, ip: ipv4-addr);
 
     /// Takes an empty batch of PDUs, writes headers, returns packet lengths
-    generate-batch: func(batch-bytes: list<u8>, partition-offset: u32) -> list<u32>;
+    generate-batch: func(batch-bytes: list<u8>) -> list<u32>;
 }
 
 /// The World definition for a Generator plugin

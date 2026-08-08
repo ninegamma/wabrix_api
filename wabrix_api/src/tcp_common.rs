@@ -7,6 +7,7 @@ use network_types::eth::EtherType;
 use crate::connections::{ConnectionNode, FlowKey, TcpState};
 use crate::headers::{IpHeader, MacHeader, TcpHeader};
 use crate::helpers::update_tcp_checksum;
+use crate::packet::Packet;
 
 // Standard TCP Flags
 pub const FLAG_FIN: u8 = 0x01;
@@ -149,18 +150,8 @@ impl core::iter::Extend<FlowKey> for TimeoutStack {
     }
 }
 
-
-/// Formats outbound Ethernet/IPv4/TCP headers directly into the frame buffer.
-/// Returns the total byte length of the written headers.
-///
-/// # Safety
-///
-/// `data_ptr` points into the frame buffer with exclusive access granted
-/// by the caller. The three header structs are local stack variables; source and
-/// destination regions do not overlap. All types are `Copy` and `#[repr(C)]`.
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn write_tcp_reply(
-    data_ptr: *mut u8,
+fn tcp_reply_headers(
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
     src_ip: u32,
@@ -170,7 +161,7 @@ pub unsafe fn write_tcp_reply(
     seq_num: u32,
     ack_num: u32,
     flags: u8,
-) -> u32 {
+) -> (MacHeader, IpHeader, TcpHeader) {
     let mut mac = MacHeader::new();
     mac.src = MacAddr6::new(
         src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5],
@@ -201,14 +192,67 @@ pub unsafe fn write_tcp_reply(
     tcp.set_window_size(64240);
     update_tcp_checksum(&mut tcp, 20, src_ip, dst_ip);
 
+    (mac, ip, tcp)
+}
+
+/// Formats outbound Ethernet/IPv4/TCP headers into a packet.
+/// Returns the total byte length of the written headers.
+#[allow(clippy::too_many_arguments)]
+pub fn write_tcp_reply(
+    packet: &mut Packet<'_>,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: u32,
+    src_port: u16,
+    dst_ip: u32,
+    dst_port: u16,
+    seq_num: u32,
+    ack_num: u32,
+    flags: u8,
+) -> u32 {
+    let (mac, ip, tcp) = tcp_reply_headers(
+        src_mac, dst_mac, src_ip, src_port, dst_ip, dst_port, seq_num, ack_num, flags,
+    );
+
+    packet.write_tcp_ipv4_headers(&mac, &ip, &tcp)
+}
+
+/// Formats outbound Ethernet/IPv4/TCP headers directly into a host frame.
+///
+/// # Safety
+///
+/// `data_ptr` must point to an exclusively borrowed, writable frame containing
+/// at least enough space for the Ethernet, IPv4, and TCP headers.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn write_tcp_reply_raw(
+    data_ptr: *mut u8,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: u32,
+    src_port: u16,
+    dst_ip: u32,
+    dst_port: u16,
+    seq_num: u32,
+    ack_num: u32,
+    flags: u8,
+) -> u32 {
+    let (mac, ip, tcp) = tcp_reply_headers(
+        src_mac, dst_mac, src_ip, src_port, dst_ip, dst_port, seq_num, ack_num, flags,
+    );
+
     let mac_size = size_of::<MacHeader>();
     let ip_size = size_of::<IpHeader>();
     let tcp_size = size_of::<TcpHeader>();
 
-
-    ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
-    ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size) as *mut IpHeader, 1);
-    ptr::copy_nonoverlapping(&tcp, data_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
+    unsafe {
+        ptr::copy_nonoverlapping(&mac, data_ptr.cast::<MacHeader>(), 1);
+        ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size).cast::<IpHeader>(), 1);
+        ptr::copy_nonoverlapping(
+            &tcp,
+            data_ptr.add(mac_size + ip_size).cast::<TcpHeader>(),
+            1,
+        );
+    }
 
     (mac_size + ip_size + tcp_size) as u32
 }
@@ -252,7 +296,7 @@ pub fn run_tcp_state_machine(
         inc_stat!(STAT_RECV_PAYLOAD);
     } else if tcp_flags & FLAG_ACK != 0 {
         match conn.state {
-            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => {  }
+            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => {}
             _ => inc_stat!(STAT_RECV_ACK),
         }
     }
@@ -267,7 +311,11 @@ pub fn run_tcp_state_machine(
             return Some((FLAG_SYN | FLAG_ACK, send_seq, conn.rcv_nxt));
         }
 
-        TcpState::SynSent if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt => {
+        TcpState::SynSent
+            if tcp_flags & FLAG_SYN != 0
+                && tcp_flags & FLAG_ACK != 0
+                && ack_num == conn.snd_nxt =>
+        {
             conn.state = TcpState::Established;
             conn.rcv_nxt = seq_num.wrapping_add(1);
             inc_stat!(STAT_SENT_SYNACK2);
@@ -304,7 +352,9 @@ pub fn run_tcp_state_machine(
             inc_stat!(STAT_SENT_ACK);
             return reply!(FLAG_ACK);
         }
-        TcpState::Established if tcp_flags & FLAG_ACK != 0 && seq_num == conn.rcv_nxt.wrapping_sub(1) => {
+        TcpState::Established
+            if tcp_flags & FLAG_ACK != 0 && seq_num == conn.rcv_nxt.wrapping_sub(1) =>
+        {
             inc_stat!(STAT_SENT_ACK);
             return reply!(FLAG_ACK);
         }

@@ -1,4 +1,5 @@
-[target.wasm32-wasip2] # Or your specific target
+[target.wasm32-wasip2]
+linker = "rust-lld"
 # Force the Wasm max memory to exactly match your reserved_bytes (e.g., 10MB = 10485760 bytes)
 rustflags = [
     # 131,072 frames * 2048 bytes = 268,435,456 bytes (Exactly 4,096 Wasm Pages)

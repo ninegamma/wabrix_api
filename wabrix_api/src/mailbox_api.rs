@@ -1,50 +1,45 @@
 use crate::packet::{Packet, PacketBatch, PacketBatchIter};
-use crate::BatchMetadata;
+use crate::{BatchMetadata, MAX_BATCH_SIZE};
 
 // =============================================================================
 // MAILBOX-BASED ZERO-COPY API
 // =============================================================================
 
-/// A batch backed by the shared UMEM mailbox rather than an inline byte slice.
+/// A batch backed by the shared UMEM mailbox in host-provided packet memory.
 ///
-/// The host writes `pdus` into the `BatchMetadata` before calling `process-batch`.
-/// The plugin processes each packet in place, then writes routing decisions back
-/// into `actions`.
-/// A batch of mailbox packets, wrapping a standard `PacketBatch`.
+/// To preserve strict zero-copy semantics, data must not be buffered in the primary memory.
+/// The WIT entry point supplies an absolute mailbox offset; construction turns it into bounded,
+/// disjoint PDU and action views once, before entering the per-packet loop.
 pub struct MailboxBatch<'a> {
     batch: PacketBatch<'a>,
-    // Additional mailbox-specific ring pointers or action slices
-    actions: &'a mut [u32],
+    action_base: u32,
 }
 
 impl<'a> MailboxBatch<'a> {
     #[inline(always)]
-    pub fn new(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> Self {
-        let umem_base = (0u32).wrapping_sub(partition_offset) as usize;
-        let mailbox_ptr = (umem_base + mailbox_offset as usize) as *mut BatchMetadata;
+    pub fn new(batch_size: u32, mailbox_offset: u32) -> Self {
+        let len = (batch_size as usize).min(MAX_BATCH_SIZE);
+        let action_offset = mailbox_offset as usize + core::mem::offset_of!(BatchMetadata, actions);
 
-        // SAFETY: The host guarantees `mailbox_ptr` points to a valid, exclusively-owned
-        // `BatchMetadata` for the duration of the `process-batch` call.
-        let mailbox = unsafe { &mut *mailbox_ptr };
-        let len = batch_size as usize;
-
+        // SAFETY: The ABI grants exclusive access to `len` PDU slots in this mailbox.
+        let batch = unsafe { PacketBatch::from_packet_memory(len, mailbox_offset) };
         Self {
-            batch: PacketBatch { pdus: &mut mailbox.pdus[..len], umem_base } ,
-            actions: &mut mailbox.actions[..len],
+            batch,
+            action_base: action_offset as u32,
         }
     }
 
-    /// Custom batch-level method unique to mailboxes
+    /// Flushes mutated actions.
+    ///
+    /// Mailbox writes are immediate, so no deferred flush or bulk copy is required.
     #[inline(always)]
-    pub fn flush_actions(&mut self) {
-        // Mailbox-specific ring submission logic
-    }
+    pub fn flush_actions(&mut self) {}
 
     #[inline(always)]
     pub fn iter_mut(&mut self) -> MailboxBatchIter<'_> {
         MailboxBatchIter {
             packet_iter: self.batch.iter_mut(),
-            action_iter: self.actions.iter_mut(),
+            next_action: self.action_base,
         }
     }
 }
@@ -71,8 +66,7 @@ impl<'a> core::ops::DerefMut for MailboxBatch<'a> {
 
 pub struct MailboxBatchIter<'a> {
     packet_iter: PacketBatchIter<'a>,
-    // An iterator or slice over the concurrent action buffer
-    action_iter: core::slice::IterMut<'a, u32>,
+    next_action: u32,
 }
 
 impl<'a> Iterator for MailboxBatchIter<'a> {
@@ -80,40 +74,36 @@ impl<'a> Iterator for MailboxBatchIter<'a> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        // Pull the next standard packet and the next mutable action reference simultaneously
         let packet = self.packet_iter.next()?;
-
-        // SAFETY: `packet_iter` and `action_iter` are initialized from slices
-        // of the exact same length in `MailboxBatch::new`. If packet is Some,
-        // action is guaranteed to be Some.
-        let action = unsafe { self.action_iter.next().unwrap_unchecked() };
-
-        Some(MailboxPacket::new(packet, action))
+        let action_offset = self.next_action;
+        self.next_action += core::mem::size_of::<u32>() as u32;
+        Some(MailboxPacket::new(packet, action_offset))
     }
 }
 
-
 /// A single packet slot from a `MailboxBatch`.
-///
-/// Wraps a standard `Packet<'a>` and adds mailbox-specific action handling.
 pub struct MailboxPacket<'a> {
     packet: Packet<'a>,
-    action: &'a mut u32,
+    action_offset: u32,
 }
 
 impl<'a> MailboxPacket<'a> {
     #[inline(always)]
-    pub fn new(packet: Packet<'a>, action: &'a mut u32) -> Self {
-        Self { packet, action }
+    pub fn new(packet: Packet<'a>, action_offset: u32) -> Self {
+        Self {
+            packet,
+            action_offset,
+        }
     }
 
-    /// Write the routing decision for this packet back into the mailbox.
+    /// Writes the routing decision directly into the mailbox.
     #[inline(always)]
     pub fn set_action(&mut self, action: u32) {
-        *self.action = action;
+        // SAFETY: The iterator assigns one exclusive action slot to each packet.
+        unsafe { crate::umem::write(self.action_offset, &action) }
     }
 
-    /// Optional: If code specifically expects to unwrap into a standard Packet reference
+    /// Provides access to the standard Packet reference if explicitly required.
     #[inline(always)]
     pub fn as_packet(&mut self) -> &mut Packet<'a> {
         &mut self.packet

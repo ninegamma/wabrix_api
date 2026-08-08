@@ -6,7 +6,7 @@ use core::fmt;
 
 const MAX_HEADERS: usize = 5;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct HeaderStack {
     /// Offsets relative to base_addr

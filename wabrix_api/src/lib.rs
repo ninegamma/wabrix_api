@@ -1,10 +1,10 @@
 #![no_std]
 extern crate alloc;
 
+use crate::wpdu_impl::Pdu0;
 use alloc::string::String;
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::wpdu_impl::Pdu0;
 
 pub mod headers;
 pub mod helpers;
@@ -18,6 +18,7 @@ pub mod connections;
 pub mod exports;
 mod hstack;
 pub mod tcp_common;
+mod umem;
 
 /// The maximum number of packets in a single batch.
 pub const MAX_BATCH_SIZE: usize = 512;
@@ -41,7 +42,6 @@ pub enum StandardOpcode {
     SetLogLevel = 0x0010,
     /// Payload: Empty. Triggers a dump to stdout/telemetry.
     TriggerMemoryDump = 0x0011,
-
 
     /// Payload: JSON list of IPs/CIDRs
     UpdateBlocklist = 0x0021,
@@ -105,7 +105,6 @@ pub struct BatchMetadata {
     /// Written by plugin during process-batch: routing decisions (route_id)
     pub actions: [u32; MAX_BATCH_SIZE],
 }
-
 
 #[derive(Serialize, Deserialize)]
 pub struct HotWasmPayload {

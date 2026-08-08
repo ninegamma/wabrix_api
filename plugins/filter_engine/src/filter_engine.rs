@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use exports::wabrix::plugins::packet_engine::Guest;
-use wabrix::plugins::logging;
 use postcard;
+use wabrix::plugins::logging;
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::{HotWasmPayload, PluginOpcode, StandardOpcode};
 
@@ -72,11 +72,13 @@ pub fn init_logging() {
 struct FilterEngine;
 
 impl Guest for FilterEngine {
-
     // Validates incoming configuration and prepares the active signature
     fn init_data(data: Vec<(String, String)>, _tsc_frequency: u64) -> bool {
         init_logging();
-        let mut config = FilterConfig { bypass: false, ..Default::default() };
+        let mut config = FilterConfig {
+            bypass: false,
+            ..Default::default()
+        };
 
         for (key, value) in data {
             if key == "signature" {
@@ -84,15 +86,18 @@ impl Guest for FilterEngine {
             }
         }
 
-        log::info!("FilterEngine initialized with signature length: {}", config.signature.len());
+        log::info!(
+            "FilterEngine initialized with signature length: {}",
+            config.signature.len()
+        );
         *CONFIG.borrow_mut() = Some(config);
 
         true
     }
 
     // Scans packet payloads and routes them based on signature presence
-    fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
-        let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+    fn process_batch(batch_size: u32, mailbox_offset: u32) -> u32 {
+        let mut batch = MailboxBatch::new(batch_size, mailbox_offset);
         let mut config_guard = CONFIG.borrow_mut();
 
         let Some(config) = config_guard.as_mut() else {
@@ -120,23 +125,7 @@ impl Guest for FilterEngine {
                 continue;
             }
 
-            // SAFETY: The packet data pointer is bounded by the length provided by AF_XDP.
-            // Memory is constrained to the WASM linear memory mapping defined by the host.
-            let payload = unsafe {
-                core::slice::from_raw_parts(
-                    packet.data_ptr(),
-                    packet.data_len() as usize,
-                )
-            };
-
-            let mut matched = false;
-
-            // Execute linear search for the malicious byte signature
-            if sig_len > 0 && payload.len() >= sig_len
-                && payload.windows(sig_len).any(|window| window == config.signature.as_slice()) {
-                    matched = true;
-            }
-
+            let matched = sig_len > 0 && packet.contains(config.signature.as_slice());
 
             if matched {
                 packet.set_action(ROUTE_DROP);
@@ -171,7 +160,6 @@ impl Guest for FilterEngine {
             }
             PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
                 if let Ok(data) = postcard::from_bytes::<HotWasmPayload>(&payload) {
-
                     let new_signature = match data.updates.get("signature") {
                         Some(s) if s.is_empty() => Some(Vec::new()),
                         Some(s) => Some(s.clone().into_bytes()),
@@ -183,7 +171,10 @@ impl Guest for FilterEngine {
                         if let Some(sig) = new_signature {
                             if config.signature != sig {
                                 config.signature = sig;
-                                log::info!("Signature dynamically updated to length: {}", config.signature.len());
+                                log::info!(
+                                    "Signature dynamically updated to length: {}",
+                                    config.signature.len()
+                                );
                             }
                         }
                     }
