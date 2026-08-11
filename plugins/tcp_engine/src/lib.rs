@@ -73,7 +73,6 @@ impl<T> WasmValue<T> {
     }
 }
 
-
 static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<TimeoutStack> = WasmCell::new(TimeoutStack::new());
@@ -156,9 +155,15 @@ impl Guest for TcpEngine {
     // - The init_data function should also set the tsc_frequency value in the EngineConfig struct.
     // - The init_data function returns a boolean value indicating whether the initialization was successful.
     // - If the initialization is successful, the plugin will be ready to process batches.
-    fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, tsc_frequency: u64) -> bool {
+    fn init_data(
+        data: Vec<(alloc::string::String, alloc::string::String)>,
+        tsc_frequency: u64,
+    ) -> bool {
         init_logging();
-        let mut config = EngineConfig { bypass: false, ..Default::default() };
+        let mut config = EngineConfig {
+            bypass: false,
+            ..Default::default()
+        };
 
         let mut raw_src_ip: Option<alloc::string::String> = None;
 
@@ -568,7 +573,6 @@ impl Guest for TcpEngine {
             }
             PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
                 if let Ok(data) = postcard::from_bytes::<HotWasmPayload>(&payload) {
-
                     // Parse phase: validate all inputs before mutating state to ensure atomic updates
                     let parsed_syn_rate = match data.updates.get("syn_rate") {
                         Some(s) if s.is_empty() => Some(None),

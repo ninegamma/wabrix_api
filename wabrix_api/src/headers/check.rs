@@ -43,7 +43,7 @@ fn sum_be_words(data: &[u8], skipword: usize) -> u32 {
     let mut sum = 0u32;
 
     let mut chunks = data.chunks_exact(2);
-    for (i, chunk) in chunks.by_ref().enumerate(){
+    for (i, chunk) in chunks.by_ref().enumerate() {
         if i != skipword {
             // chunk has length 2
             let word = u16::from_be_bytes([chunk[0], chunk[1]]);

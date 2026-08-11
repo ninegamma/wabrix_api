@@ -120,7 +120,7 @@ impl TcpHeader {
             let current = core::ptr::read_unaligned(&raw const self.src_port);
             core::ptr::write_unaligned(
                 &raw mut self.src_port,
-                u16::to_be(u16::from_be(current) + 1)
+                u16::to_be(u16::from_be(current) + 1),
             );
         }
     }
@@ -471,11 +471,8 @@ impl TcpHeader {
     pub fn update_checksum_incremental(&mut self, old_word: u16, new_word: u16) {
         unsafe {
             let current_csum = core::ptr::read_unaligned(&raw const self.csum);
-            let new_csum = update_checksum_incremental(
-                u16::from_be(current_csum),
-                old_word,
-                new_word,
-            );
+            let new_csum =
+                update_checksum_incremental(u16::from_be(current_csum), old_word, new_word);
             core::ptr::write_unaligned(&raw mut self.csum, u16::to_be(new_csum));
         }
     }

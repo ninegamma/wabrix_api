@@ -29,7 +29,10 @@ impl<'a> MailboxBatch<'a> {
         let len = batch_size as usize;
 
         Self {
-            batch: PacketBatch { pdus: &mut mailbox.pdus[..len], umem_base } ,
+            batch: PacketBatch {
+                pdus: &mut mailbox.pdus[..len],
+                umem_base,
+            },
             actions: &mut mailbox.actions[..len],
         }
     }
@@ -91,7 +94,6 @@ impl<'a> Iterator for MailboxBatchIter<'a> {
         Some(MailboxPacket::new(packet, action))
     }
 }
-
 
 /// A single packet slot from a `MailboxBatch`.
 ///

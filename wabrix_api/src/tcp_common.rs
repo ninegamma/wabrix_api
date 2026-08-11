@@ -149,7 +149,6 @@ impl core::iter::Extend<FlowKey> for TimeoutStack {
     }
 }
 
-
 /// Formats outbound Ethernet/IPv4/TCP headers directly into the frame buffer.
 /// Returns the total byte length of the written headers.
 ///
@@ -205,7 +204,6 @@ pub unsafe fn write_tcp_reply(
     let ip_size = size_of::<IpHeader>();
     let tcp_size = size_of::<TcpHeader>();
 
-
     ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
     ptr::copy_nonoverlapping(&ip, data_ptr.add(mac_size) as *mut IpHeader, 1);
     ptr::copy_nonoverlapping(&tcp, data_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
@@ -252,7 +250,7 @@ pub fn run_tcp_state_machine(
         inc_stat!(STAT_RECV_PAYLOAD);
     } else if tcp_flags & FLAG_ACK != 0 {
         match conn.state {
-            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => {  }
+            TcpState::SynReceived | TcpState::FinWait1 | TcpState::Closing | TcpState::LastAck => {}
             _ => inc_stat!(STAT_RECV_ACK),
         }
     }
@@ -267,7 +265,11 @@ pub fn run_tcp_state_machine(
             return Some((FLAG_SYN | FLAG_ACK, send_seq, conn.rcv_nxt));
         }
 
-        TcpState::SynSent if tcp_flags & FLAG_SYN != 0 && tcp_flags & FLAG_ACK != 0 && ack_num == conn.snd_nxt => {
+        TcpState::SynSent
+            if tcp_flags & FLAG_SYN != 0
+                && tcp_flags & FLAG_ACK != 0
+                && ack_num == conn.snd_nxt =>
+        {
             conn.state = TcpState::Established;
             conn.rcv_nxt = seq_num.wrapping_add(1);
             inc_stat!(STAT_SENT_SYNACK2);
@@ -304,7 +306,9 @@ pub fn run_tcp_state_machine(
             inc_stat!(STAT_SENT_ACK);
             return reply!(FLAG_ACK);
         }
-        TcpState::Established if tcp_flags & FLAG_ACK != 0 && seq_num == conn.rcv_nxt.wrapping_sub(1) => {
+        TcpState::Established
+            if tcp_flags & FLAG_ACK != 0 && seq_num == conn.rcv_nxt.wrapping_sub(1) =>
+        {
             inc_stat!(STAT_SENT_ACK);
             return reply!(FLAG_ACK);
         }

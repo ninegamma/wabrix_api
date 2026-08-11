@@ -21,13 +21,7 @@ impl fmt::Display for MacHeader {
         let src = unsafe { core::ptr::read_unaligned(&raw const self.src) };
         let dst = unsafe { core::ptr::read_unaligned(&raw const self.dst) };
 
-        write!(
-            f,
-            "{} > {} 0x{:04x}",
-            src,
-            dst,
-            self.etype()
-        )
+        write!(f, "{} > {} 0x{:04x}", src, dst, self.etype())
     }
 }
 
@@ -90,20 +84,14 @@ impl MacHeader {
         // - Extracts the raw mutable pointer to the packed field without creating a reference.
         // - Performs a safe unaligned write directly to the memory address.
         unsafe {
-            core::ptr::write_unaligned(
-                &raw mut self.etype,
-                u16::to_be(etype)
-            );
+            core::ptr::write_unaligned(&raw mut self.etype, u16::to_be(etype));
         }
     }
 
     #[inline]
     pub fn set_ethertype(&mut self, ethertype: EtherType) {
         unsafe {
-            core::ptr::write_unaligned(
-                &raw mut self.etype,
-                ethertype as u16
-            );
+            core::ptr::write_unaligned(&raw mut self.etype, ethertype as u16);
         }
     }
 

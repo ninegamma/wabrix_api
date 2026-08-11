@@ -112,10 +112,7 @@ impl IpHeader {
         // - Extracts the raw mutable pointer to the packed field without creating a reference.
         // - Performs a safe unaligned write directly to the memory address.
         unsafe {
-            core::ptr::write_unaligned(
-                &raw mut self.src_ip,
-                u32::to_be(src)
-            );
+            core::ptr::write_unaligned(&raw mut self.src_ip, u32::to_be(src));
         }
     }
 
@@ -128,10 +125,7 @@ impl IpHeader {
     #[inline]
     pub fn set_dst(&mut self, dst: u32) {
         unsafe {
-            core::ptr::write_unaligned(
-                &raw mut self.dst_ip,
-                u32::to_be(dst)
-            );
+            core::ptr::write_unaligned(&raw mut self.dst_ip, u32::to_be(dst));
         }
     }
 
@@ -146,29 +140,20 @@ impl IpHeader {
         unsafe {
             let current_val = core::ptr::read_unaligned(&raw const self.ttl_to_csum);
             let blanked = current_val & !0x000000ff;
-            core::ptr::write_unaligned(
-                &raw mut self.ttl_to_csum,
-                blanked | (ttl as u32)
-            );
+            core::ptr::write_unaligned(&raw mut self.ttl_to_csum, blanked | (ttl as u32));
         }
     }
 
     pub fn set_src_address(&mut self, src: Ipv4Addr) {
         unsafe {
-            core::ptr::write_unaligned(
-                &raw mut self.src_ip,
-                u32::from(src).to_be()
-            );
+            core::ptr::write_unaligned(&raw mut self.src_ip, u32::from(src).to_be());
         }
     }
 
     #[inline]
     pub fn set_dst_address(&mut self, dst: Ipv4Addr) {
         unsafe {
-            core::ptr::write_unaligned(
-                &raw mut self.dst_ip,
-                u32::from(dst).to_be()
-            );
+            core::ptr::write_unaligned(&raw mut self.dst_ip, u32::from(dst).to_be());
         }
     }
 
@@ -185,7 +170,7 @@ impl IpHeader {
             let blanked = ttlpcsum & !0xff00;
             core::ptr::write_unaligned(
                 &raw mut self.ttl_to_csum,
-                blanked | ((protocol as u32) << 8)
+                blanked | ((protocol as u32) << 8),
             );
         }
     }
@@ -203,7 +188,7 @@ impl IpHeader {
             let blanked = ttlpcsum & !0xffff0000;
             core::ptr::write_unaligned(
                 &raw mut self.ttl_to_csum,
-                blanked | ((u16::to_be(csum) as u32) << 16)
+                blanked | ((u16::to_be(csum) as u32) << 16),
             );
         }
     }
@@ -221,7 +206,7 @@ impl IpHeader {
             let blanked = id_flag_fragment & !0xffff;
             core::ptr::write_unaligned(
                 &raw mut self.id_to_foffset,
-                blanked | (u16::to_be(id) as u32)
+                blanked | (u16::to_be(id) as u32),
             );
         }
     }
@@ -240,7 +225,7 @@ impl IpHeader {
             let blanked = id_flag_fragment & !0x00e00000;
             core::ptr::write_unaligned(
                 &raw mut self.id_to_foffset,
-                blanked | (((flags & 0x7) as u32) << (16 + 5))
+                blanked | (((flags & 0x7) as u32) << (16 + 5)),
             );
         }
     }
@@ -256,12 +241,10 @@ impl IpHeader {
     pub fn set_fragment_offset(&mut self, offset: u16) {
         let offset_correct = offset as u32;
         unsafe {
-            let id_to_offset_le = u32::from_be(core::ptr::read_unaligned(&raw const self.id_to_foffset));
+            let id_to_offset_le =
+                u32::from_be(core::ptr::read_unaligned(&raw const self.id_to_foffset));
             let new_val = u32::to_be(id_to_offset_le & !0x1fff | offset_correct);
-            core::ptr::write_unaligned(
-                &raw mut self.id_to_foffset,
-                new_val
-            );
+            core::ptr::write_unaligned(&raw mut self.id_to_foffset, new_val);
         }
     }
 
@@ -278,7 +261,7 @@ impl IpHeader {
             let blanked = version_to_len & !0xf0;
             core::ptr::write_unaligned(
                 &raw mut self.version_to_len,
-                blanked | (((version & 0xf) as u32) << 4)
+                blanked | (((version & 0xf) as u32) << 4),
             );
         }
     }
@@ -296,7 +279,7 @@ impl IpHeader {
             let blanked = version_to_len & !0x0f;
             core::ptr::write_unaligned(
                 &raw mut self.version_to_len,
-                blanked | ((ihl & 0x0f) as u32)
+                blanked | ((ihl & 0x0f) as u32),
             );
         }
     }
@@ -314,7 +297,7 @@ impl IpHeader {
             let blanked = version_to_len & !0xfc00;
             core::ptr::write_unaligned(
                 &raw mut self.version_to_len,
-                blanked | (((dscp & 0x3f) as u32) << 10)
+                blanked | (((dscp & 0x3f) as u32) << 10),
             );
         }
     }
@@ -332,7 +315,7 @@ impl IpHeader {
             let blanked = version_to_len & !0x0300;
             core::ptr::write_unaligned(
                 &raw mut self.version_to_len,
-                blanked | (((ecn & 0x03) as u32) << 8)
+                blanked | (((ecn & 0x03) as u32) << 8),
             );
         }
     }
@@ -350,7 +333,7 @@ impl IpHeader {
             let blanked = version_to_len & !0xffff0000;
             core::ptr::write_unaligned(
                 &raw mut self.version_to_len,
-                blanked | ((u16::to_be(len) as u32) << 16)
+                blanked | ((u16::to_be(len) as u32) << 16),
             );
         }
     }
