@@ -68,12 +68,13 @@ impl IpHeader {
         let src_ip = self.src();
         let dst_ip = self.dst();
         if (protocol == 6 || protocol == 17) && self.payload_size(0) >= 4 {
-            // SAFETY: `self` is a valid `&IpHeader` reference. `self.offset()` returns the
-            // IP header length in bytes (validated by `payload_size(0) >= 4` above), so
-            // `port_as_u8` points into the L4 payload region which is at least 4 bytes long.
-            // Reading 2+2 bytes for src/dst port via `from_raw_parts` is within bounds.
+            // SAFETY:
+            // - `self.offset()` returns the IP header length in bytes (validated by `payload_size(0) >= 4` above).
+            // - `port_as_u8` points into the L4 payload region which is at least 4 bytes long.
+            // - Reading 2+2 bytes for src/dst port via `from_raw_parts` is within bounds.
+            // - Using `&raw const` avoids intermediate alignment assertions.
             unsafe {
-                let self_as_u8 = (self as *const IpHeader) as *const u8;
+                let self_as_u8 = &raw const *self as *const u8;
                 let port_as_u8 = self_as_u8.add(self.offset());
                 let port_slice = slice::from_raw_parts(port_as_u8, 4);
                 let src_port = BigEndian::read_u16(&port_slice[..2]);
@@ -98,101 +99,155 @@ impl IpHeader {
 
     #[inline]
     pub fn src(&self) -> u32 {
-        u32::from_be(self.src_ip)
+        // SAFETY:
+        // - Extracts the raw constant pointer to the packed field without creating an intermediate reference.
+        // - Performs a safe unaligned read to prevent hardware alignment faults.
+        let raw_src = unsafe { core::ptr::read_unaligned(&raw const self.src_ip) };
+        u32::from_be(raw_src)
     }
 
     #[inline]
     pub fn set_src(&mut self, src: u32) {
-        self.src_ip = u32::to_be(src)
-    }
-
-    pub fn set_src_address(&mut self, src: Ipv4Addr) {
-        self.src_ip = u32::from(src).to_be()
+        // SAFETY:
+        // - Extracts the raw mutable pointer to the packed field without creating a reference.
+        // - Performs a safe unaligned write directly to the memory address.
+        unsafe {
+            core::ptr::write_unaligned(
+                &raw mut self.src_ip,
+                u32::to_be(src)
+            );
+        }
     }
 
     #[inline]
     pub fn dst(&self) -> u32 {
-        u32::from_be(self.dst_ip)
+        let raw_dst = unsafe { core::ptr::read_unaligned(&raw const self.dst_ip) };
+        u32::from_be(raw_dst)
     }
 
     #[inline]
     pub fn set_dst(&mut self, dst: u32) {
-        self.dst_ip = u32::to_be(dst);
-    }
-
-    #[inline]
-    pub fn set_dst_address(&mut self, dst: Ipv4Addr) {
-        self.dst_ip = u32::from(dst).to_be()
+        unsafe {
+            core::ptr::write_unaligned(
+                &raw mut self.dst_ip,
+                u32::to_be(dst)
+            );
+        }
     }
 
     #[inline]
     pub fn ttl(&self) -> u8 {
-        let ttlpcsum = self.ttl_to_csum;
+        let ttlpcsum = unsafe { core::ptr::read_unaligned(&raw const self.ttl_to_csum) };
         (ttlpcsum & 0x000000ff) as u8
     }
 
     #[inline]
     pub fn set_ttl(&mut self, ttl: u8) {
-        let ttlpcsum = self.ttl_to_csum;
-        let blanked = ttlpcsum & !0x000000ff;
-        self.ttl_to_csum = blanked | (ttl as u32);
+        unsafe {
+            let current_val = core::ptr::read_unaligned(&raw const self.ttl_to_csum);
+            let blanked = current_val & !0x000000ff;
+            core::ptr::write_unaligned(
+                &raw mut self.ttl_to_csum,
+                blanked | (ttl as u32)
+            );
+        }
+    }
+
+    pub fn set_src_address(&mut self, src: Ipv4Addr) {
+        unsafe {
+            core::ptr::write_unaligned(
+                &raw mut self.src_ip,
+                u32::from(src).to_be()
+            );
+        }
+    }
+
+    #[inline]
+    pub fn set_dst_address(&mut self, dst: Ipv4Addr) {
+        unsafe {
+            core::ptr::write_unaligned(
+                &raw mut self.dst_ip,
+                u32::from(dst).to_be()
+            );
+        }
     }
 
     #[inline]
     pub fn protocol(&self) -> u8 {
-        let ttlpcsum = self.ttl_to_csum;
+        let ttlpcsum = unsafe { core::ptr::read_unaligned(&raw const self.ttl_to_csum) };
         ((ttlpcsum & 0xff00) >> 8) as u8
     }
 
     #[inline]
     pub fn set_protocol(&mut self, protocol: u8) {
-        let ttlpcsum = self.ttl_to_csum;
-        let blanked = ttlpcsum & !0xff00;
-        self.ttl_to_csum = blanked | ((protocol as u32) << 8);
+        unsafe {
+            let ttlpcsum = core::ptr::read_unaligned(&raw const self.ttl_to_csum);
+            let blanked = ttlpcsum & !0xff00;
+            core::ptr::write_unaligned(
+                &raw mut self.ttl_to_csum,
+                blanked | ((protocol as u32) << 8)
+            );
+        }
     }
 
     #[inline]
     pub fn csum(&self) -> u16 {
-        let ttlpcsum = self.ttl_to_csum;
+        let ttlpcsum = unsafe { core::ptr::read_unaligned(&raw const self.ttl_to_csum) };
         ((ttlpcsum & 0xffff0000) >> 16) as u16
     }
 
     #[inline]
     pub fn set_csum(&mut self, csum: u16) {
-        let ttlpcsum = self.ttl_to_csum;
-        let blanked = ttlpcsum & !0xffff0000;
-        self.ttl_to_csum = blanked | ((u16::to_be(csum) as u32) << 16);
+        unsafe {
+            let ttlpcsum = core::ptr::read_unaligned(&raw const self.ttl_to_csum);
+            let blanked = ttlpcsum & !0xffff0000;
+            core::ptr::write_unaligned(
+                &raw mut self.ttl_to_csum,
+                blanked | ((u16::to_be(csum) as u32) << 16)
+            );
+        }
     }
 
     #[inline]
     pub fn id(&self) -> u16 {
-        let id_flag_fragment = self.id_to_foffset;
+        let id_flag_fragment = unsafe { core::ptr::read_unaligned(&raw const self.id_to_foffset) };
         u16::from_be((id_flag_fragment & 0xffff) as u16)
     }
 
     #[inline]
     pub fn set_id(&mut self, id: u16) {
-        let id_flag_fragment = self.id_to_foffset;
-        let blanked = id_flag_fragment & !0xffff;
-        self.id_to_foffset = blanked | (u16::to_be(id) as u32);
+        unsafe {
+            let id_flag_fragment = core::ptr::read_unaligned(&raw const self.id_to_foffset);
+            let blanked = id_flag_fragment & !0xffff;
+            core::ptr::write_unaligned(
+                &raw mut self.id_to_foffset,
+                blanked | (u16::to_be(id) as u32)
+            );
+        }
     }
 
     #[inline]
     pub fn flags(&self) -> u8 {
-        let id_flag_fragment = self.id_to_foffset;
+        let id_flag_fragment = unsafe { core::ptr::read_unaligned(&raw const self.id_to_foffset) };
         let flag_fragment = (id_flag_fragment >> 21) as u16;
         (flag_fragment & 0x7) as u8
     }
 
     #[inline]
     pub fn set_flags(&mut self, flags: u8) {
-        self.id_to_foffset =
-            (self.id_to_foffset & !0x00e00000) | (((flags & 0x7) as u32) << (16 + 5));
+        unsafe {
+            let id_flag_fragment = core::ptr::read_unaligned(&raw const self.id_to_foffset);
+            let blanked = id_flag_fragment & !0x00e00000;
+            core::ptr::write_unaligned(
+                &raw mut self.id_to_foffset,
+                blanked | (((flags & 0x7) as u32) << (16 + 5))
+            );
+        }
     }
 
     #[inline]
     pub fn fragment_offset(&self) -> u16 {
-        let id_flag_fragment = self.id_to_foffset;
+        let id_flag_fragment = unsafe { core::ptr::read_unaligned(&raw const self.id_to_foffset) };
         let flag_fragment = (id_flag_fragment & 0xffff) as u16;
         u16::from_be(flag_fragment & !0xe >> 3)
     }
@@ -200,59 +255,104 @@ impl IpHeader {
     #[inline]
     pub fn set_fragment_offset(&mut self, offset: u16) {
         let offset_correct = offset as u32;
-        let id_to_offset_le = u32::from_be(self.id_to_foffset);
-        self.id_to_foffset = u32::to_be(id_to_offset_le & !0x1fff | offset_correct);
+        unsafe {
+            let id_to_offset_le = u32::from_be(core::ptr::read_unaligned(&raw const self.id_to_foffset));
+            let new_val = u32::to_be(id_to_offset_le & !0x1fff | offset_correct);
+            core::ptr::write_unaligned(
+                &raw mut self.id_to_foffset,
+                new_val
+            );
+        }
     }
 
     #[inline]
     pub fn version(&self) -> u8 {
-        ((self.version_to_len & 0xf0) as u8) >> 4
+        let version_to_len = unsafe { core::ptr::read_unaligned(&raw const self.version_to_len) };
+        ((version_to_len & 0xf0) as u8) >> 4
     }
 
     #[inline]
     pub fn set_version(&mut self, version: u8) {
-        self.version_to_len = (self.version_to_len & !0xf0) | (((version & 0xf) as u32) << 4);
+        unsafe {
+            let version_to_len = core::ptr::read_unaligned(&raw const self.version_to_len);
+            let blanked = version_to_len & !0xf0;
+            core::ptr::write_unaligned(
+                &raw mut self.version_to_len,
+                blanked | (((version & 0xf) as u32) << 4)
+            );
+        }
     }
 
     #[inline]
     pub fn ihl(&self) -> u8 {
-        (self.version_to_len & 0x0f) as u8
+        let version_to_len = unsafe { core::ptr::read_unaligned(&raw const self.version_to_len) };
+        (version_to_len & 0x0f) as u8
     }
 
     #[inline]
     pub fn set_ihl(&mut self, ihl: u8) {
-        self.version_to_len = (self.version_to_len & !0x0f) | ((ihl & 0x0f) as u32);
+        unsafe {
+            let version_to_len = core::ptr::read_unaligned(&raw const self.version_to_len);
+            let blanked = version_to_len & !0x0f;
+            core::ptr::write_unaligned(
+                &raw mut self.version_to_len,
+                blanked | ((ihl & 0x0f) as u32)
+            );
+        }
     }
 
     #[inline]
     pub fn dscp(&self) -> u8 {
-        ((self.version_to_len & 0xfc00) >> 10) as u8
+        let version_to_len = unsafe { core::ptr::read_unaligned(&raw const self.version_to_len) };
+        ((version_to_len & 0xfc00) >> 10) as u8
     }
 
     #[inline]
     pub fn set_dscp(&mut self, dscp: u8) {
-        self.version_to_len = (self.version_to_len & !0xfc00) | (((dscp & 0x3f) as u32) << 10);
+        unsafe {
+            let version_to_len = core::ptr::read_unaligned(&raw const self.version_to_len);
+            let blanked = version_to_len & !0xfc00;
+            core::ptr::write_unaligned(
+                &raw mut self.version_to_len,
+                blanked | (((dscp & 0x3f) as u32) << 10)
+            );
+        }
     }
 
     #[inline]
     pub fn ecn(&self) -> u8 {
-        ((self.version_to_len & 0x0300) >> 8) as u8
+        let version_to_len = unsafe { core::ptr::read_unaligned(&raw const self.version_to_len) };
+        ((version_to_len & 0x0300) >> 8) as u8
     }
 
     #[inline]
     pub fn set_ecn(&mut self, ecn: u8) {
-        self.version_to_len = (self.version_to_len & !0x0300) | (((ecn & 0x03) as u32) << 8);
+        unsafe {
+            let version_to_len = core::ptr::read_unaligned(&raw const self.version_to_len);
+            let blanked = version_to_len & !0x0300;
+            core::ptr::write_unaligned(
+                &raw mut self.version_to_len,
+                blanked | (((ecn & 0x03) as u32) << 8)
+            );
+        }
     }
 
     #[inline]
     pub fn length(&self) -> u16 {
-        u16::from_be(((self.version_to_len & 0xffff0000) >> 16) as u16)
+        let version_to_len = unsafe { core::ptr::read_unaligned(&raw const self.version_to_len) };
+        u16::from_be(((version_to_len & 0xffff0000) >> 16) as u16)
     }
 
     #[inline]
     pub fn set_length(&mut self, len: u16) {
-        self.version_to_len =
-            (self.version_to_len & !0xffff0000) | ((u16::to_be(len) as u32) << 16);
+        unsafe {
+            let version_to_len = core::ptr::read_unaligned(&raw const self.version_to_len);
+            let blanked = version_to_len & !0xffff0000;
+            core::ptr::write_unaligned(
+                &raw mut self.version_to_len,
+                blanked | ((u16::to_be(len) as u32) << 16)
+            );
+        }
     }
 
     #[inline]
@@ -263,14 +363,15 @@ impl IpHeader {
 
     #[inline]
     pub fn update_checksum(&mut self) {
-        // SAFETY: `self` is a valid `&mut IpHeader` reference. Casting to `*const u8` and
-        // reading `size_of::<IpHeader>()` bytes is sound because all bit patterns are valid
-        // for a byte slice view. The slice does not outlive `self`.
+        // SAFETY:
+        // - Using the raw const operator prevents the compiler from asserting natural alignment
+        //   on the packed struct, avoiding Undefined Behavior.
+        // - Casting to *const u8 and reading the exact struct size in bytes is sound
+        //   because all bit patterns are valid for a byte slice.
+        // - The resulting slice does not outlive the mutable reference to self.
         unsafe {
-            let bytes = slice::from_raw_parts(
-                (self as *const IpHeader) as *const u8,
-                size_of::<IpHeader>(),
-            );
+            let ptr = &raw const *self as *const u8;
+            let bytes = slice::from_raw_parts(ptr, size_of::<IpHeader>());
             self.set_csum(checksum(bytes, 5));
         };
     }

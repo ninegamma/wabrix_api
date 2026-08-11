@@ -72,114 +72,130 @@ impl Ipv6Header {
         header
     }
 
-    /// Get version (should always be 6 for IPv6)
     #[inline]
     pub fn version(&self) -> u8 {
-        (u32::from_be(self.version_to_flow) >> 28) as u8
+        // SAFETY:
+        // - Extracts the raw constant pointer to the packed field without creating an intermediate reference.
+        // - Performs a safe unaligned read to prevent hardware alignment faults.
+        let raw_vtf = unsafe { core::ptr::read_unaligned(&raw const self.version_to_flow) };
+        (u32::from_be(raw_vtf) >> 28) as u8
     }
 
-    /// Set version (should be 6)
     #[inline]
     pub fn set_version(&mut self, version: u8) {
-        let vtf = u32::from_be(self.version_to_flow);
-        self.version_to_flow = u32::to_be((vtf & 0x0FFFFFFF) | ((version as u32 & 0xF) << 28));
+        // SAFETY:
+        // - Extracts the raw mutable pointer to the packed field without creating a reference.
+        // - Performs a safe unaligned write directly to the memory address.
+        unsafe {
+            let vtf = u32::from_be(core::ptr::read_unaligned(&raw const self.version_to_flow));
+            let new_vtf = u32::to_be((vtf & 0x0FFFFFFF) | ((version as u32 & 0xF) << 28));
+            core::ptr::write_unaligned(&raw mut self.version_to_flow, new_vtf);
+        }
     }
 
-    /// Get traffic class (similar to DSCP/ToS in IPv4)
     #[inline]
     pub fn traffic_class(&self) -> u8 {
-        ((u32::from_be(self.version_to_flow) >> 20) & 0xFF) as u8
+        let raw_vtf = unsafe { core::ptr::read_unaligned(&raw const self.version_to_flow) };
+        ((u32::from_be(raw_vtf) >> 20) & 0xFF) as u8
     }
 
-    /// Set traffic class
     #[inline]
     pub fn set_traffic_class(&mut self, tc: u8) {
-        let vtf = u32::from_be(self.version_to_flow);
-        self.version_to_flow = u32::to_be((vtf & 0xF00FFFFF) | ((tc as u32) << 20));
+        unsafe {
+            let vtf = u32::from_be(core::ptr::read_unaligned(&raw const self.version_to_flow));
+            let new_vtf = u32::to_be((vtf & 0xF00FFFFF) | ((tc as u32) << 20));
+            core::ptr::write_unaligned(&raw mut self.version_to_flow, new_vtf);
+        }
     }
 
-    /// Get flow label (20 bits)
     #[inline]
     pub fn flow_label(&self) -> u32 {
-        u32::from_be(self.version_to_flow) & 0x000FFFFF
+        let raw_vtf = unsafe { core::ptr::read_unaligned(&raw const self.version_to_flow) };
+        u32::from_be(raw_vtf) & 0x000FFFFF
     }
 
-    /// Set flow label
     #[inline]
     pub fn set_flow_label(&mut self, label: u32) {
-        let vtf = u32::from_be(self.version_to_flow);
-        self.version_to_flow = u32::to_be((vtf & 0xFFF00000) | (label & 0x000FFFFF));
+        unsafe {
+            let vtf = u32::from_be(core::ptr::read_unaligned(&raw const self.version_to_flow));
+            let new_vtf = u32::to_be((vtf & 0xFFF00000) | (label & 0x000FFFFF));
+            core::ptr::write_unaligned(&raw mut self.version_to_flow, new_vtf);
+        }
     }
 
-    /// Get payload length (in bytes, not including IPv6 header)
     #[inline]
     pub fn payload_length(&self) -> u16 {
-        u16::from_be(self.payload_len)
+        let raw_len = unsafe { core::ptr::read_unaligned(&raw const self.payload_len) };
+        u16::from_be(raw_len)
     }
 
-    /// Set payload length
     #[inline]
     pub fn set_payload_length(&mut self, len: u16) {
-        self.payload_len = u16::to_be(len);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.payload_len, u16::to_be(len));
+        }
     }
 
-    /// Get next header (protocol type)
     #[inline]
     pub fn next_header(&self) -> u8 {
-        self.next_header
+        unsafe { core::ptr::read_unaligned(&raw const self.next_header) }
     }
 
-    /// Set next header
     #[inline]
     pub fn set_next_header(&mut self, nh: u8) {
-        self.next_header = nh;
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.next_header, nh);
+        }
     }
 
-    /// Get hop limit (similar to TTL in IPv4)
     #[inline]
     pub fn hop_limit(&self) -> u8 {
-        self.hop_limit
+        unsafe { core::ptr::read_unaligned(&raw const self.hop_limit) }
     }
 
-    /// Set hop limit
     #[inline]
     pub fn set_hop_limit(&mut self, hl: u8) {
-        self.hop_limit = hl;
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.hop_limit, hl);
+        }
     }
 
-    /// Get source IPv6 address
     #[inline]
     pub fn src(&self) -> Ipv6Addr {
-        Ipv6Addr::from(self.src_ip)
+        let raw_ip = unsafe { core::ptr::read_unaligned(&raw const self.src_ip) };
+        Ipv6Addr::from(raw_ip)
     }
 
-    /// Set source IPv6 address
     #[inline]
     pub fn set_src(&mut self, addr: Ipv6Addr) {
-        self.src_ip = addr.octets();
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.src_ip, addr.octets());
+        }
     }
 
-    /// Get destination IPv6 address
     #[inline]
     pub fn dst(&self) -> Ipv6Addr {
-        Ipv6Addr::from(self.dst_ip)
+        let raw_ip = unsafe { core::ptr::read_unaligned(&raw const self.dst_ip) };
+        Ipv6Addr::from(raw_ip)
     }
 
-    /// Set destination IPv6 address
     #[inline]
     pub fn set_dst(&mut self, addr: Ipv6Addr) {
-        self.dst_ip = addr.octets();
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.dst_ip, addr.octets());
+        }
     }
 
-    /// Get source IPv6 address as raw bytes
     #[inline]
     pub fn src_bytes(&self) -> &[u8; 16] {
-        &self.src_ip
+        // SAFETY:
+        // - Returning a reference directly to an array field within a packed struct requires caution.
+        // - Callers must treat this as unaligned or copy bytes if safety guarantees are strict.
+        unsafe { &*(&raw const self.src_ip) }
     }
 
-    /// Get destination IPv6 address as raw bytes
     #[inline]
     pub fn dst_bytes(&self) -> &[u8; 16] {
-        &self.dst_ip
+        unsafe { &*(&raw const self.dst_ip) }
     }
 }

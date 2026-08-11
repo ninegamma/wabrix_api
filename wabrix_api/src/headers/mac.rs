@@ -15,12 +15,18 @@ pub struct MacHeader {
 
 impl fmt::Display for MacHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // SAFETY:
+        // - Extracts the raw constant pointers without creating intermediate references.
+        // - Performs safe unaligned reads to prevent hardware alignment faults.
+        let src = unsafe { core::ptr::read_unaligned(&raw const self.src) };
+        let dst = unsafe { core::ptr::read_unaligned(&raw const self.dst) };
+
         write!(
             f,
             "{} > {} 0x{:04x}",
-            self.src,
-            self.dst,
-            u16::from_be(self.etype)
+            src,
+            dst,
+            self.etype()
         )
     }
 }
@@ -32,7 +38,7 @@ pub const HDR_SIZE_802_1AD: usize = HDR_SIZE_802_1Q + 4;
 impl EndOffset for MacHeader {
     #[inline]
     fn offset(&self) -> usize {
-        match self.etype {
+        match self.etype() {
             0x8100 => HDR_SIZE_802_1Q,
             0x9100 => HDR_SIZE_802_1AD,
             _ => MAC_HDR_SIZE,
@@ -60,29 +66,69 @@ impl MacHeader {
     }
 
     #[inline]
+    pub fn src(&self) -> MacAddress {
+        // SAFETY:
+        // - Extracts the raw constant pointer to the packed field without creating an intermediate reference.
+        // - Performs a safe unaligned read to prevent hardware alignment faults.
+        unsafe { core::ptr::read_unaligned(&raw const self.src) }
+    }
+
+    #[inline]
+    pub fn dst(&self) -> MacAddress {
+        unsafe { core::ptr::read_unaligned(&raw const self.dst) }
+    }
+
+    #[inline]
     pub fn etype(&self) -> u16 {
-        u16::from_be(self.etype)
+        let raw_etype = unsafe { core::ptr::read_unaligned(&raw const self.etype) };
+        u16::from_be(raw_etype)
     }
 
     #[inline]
     pub fn set_etype(&mut self, etype: u16) {
-        self.etype = u16::to_be(etype)
+        // SAFETY:
+        // - Extracts the raw mutable pointer to the packed field without creating a reference.
+        // - Performs a safe unaligned write directly to the memory address.
+        unsafe {
+            core::ptr::write_unaligned(
+                &raw mut self.etype,
+                u16::to_be(etype)
+            );
+        }
     }
+
     #[inline]
     pub fn set_ethertype(&mut self, ethertype: EtherType) {
-        self.etype = ethertype as u16
+        unsafe {
+            core::ptr::write_unaligned(
+                &raw mut self.etype,
+                ethertype as u16
+            );
+        }
     }
 
     #[inline]
     pub fn swap_addresses(&mut self) {
-        core::mem::swap(&mut self.src, &mut self.dst);
+        // SAFETY:
+        // - core::mem::swap requires mutable references, which triggers UB on packed fields.
+        // - Performing unaligned reads and writes manually bypasses the reference requirement.
+        unsafe {
+            let temp_src = core::ptr::read_unaligned(&raw const self.src);
+            let temp_dst = core::ptr::read_unaligned(&raw const self.dst);
+            core::ptr::write_unaligned(&raw mut self.src, temp_dst);
+            core::ptr::write_unaligned(&raw mut self.dst, temp_src);
+        }
     }
 
     pub fn set_dmac(&mut self, dmac: &MacAddress) {
-        self.dst = *dmac;
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.dst, *dmac);
+        }
     }
 
     pub fn set_smac(&mut self, smac: &MacAddress) {
-        self.src = *smac;
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.src, *smac);
+        }
     }
 }

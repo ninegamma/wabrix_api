@@ -3,7 +3,6 @@ use core::default::Default;
 use core::fmt;
 
 /// UDP header using SSE
-// #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C, packed)]
 pub struct UdpHeader {
@@ -29,7 +28,7 @@ impl fmt::Display for UdpHeader {
 impl EndOffset for UdpHeader {
     #[inline]
     fn offset(&self) -> usize {
-        8 // 8 bytes
+        8
     }
 
     #[inline]
@@ -56,41 +55,59 @@ impl UdpHeader {
 
     #[inline]
     pub fn src_port(&self) -> u16 {
-        u16::from_be(self.src_port)
+        // SAFETY:
+        // - Extracts the raw constant pointer to the packed field without creating an intermediate reference.
+        // - Performs a safe unaligned read to prevent hardware alignment faults.
+        let raw_port = unsafe { core::ptr::read_unaligned(&raw const self.src_port) };
+        u16::from_be(raw_port)
     }
 
     #[inline]
     pub fn dst_port(&self) -> u16 {
-        u16::from_be(self.dst_port)
+        let raw_port = unsafe { core::ptr::read_unaligned(&raw const self.dst_port) };
+        u16::from_be(raw_port)
     }
 
     #[inline]
     pub fn set_src_port(&mut self, port: u16) {
-        self.src_port = u16::to_be(port);
+        // SAFETY:
+        // - Extracts the raw mutable pointer to the packed field without creating a reference.
+        // - Performs a safe unaligned write directly to the memory address.
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.src_port, u16::to_be(port));
+        }
     }
 
     #[inline]
     pub fn set_dst_port(&mut self, port: u16) {
-        self.dst_port = u16::to_be(port);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.dst_port, u16::to_be(port));
+        }
     }
 
     #[inline]
     pub fn length(&self) -> u16 {
-        u16::from_be(self.len)
+        let raw_len = unsafe { core::ptr::read_unaligned(&raw const self.len) };
+        u16::from_be(raw_len)
     }
 
     #[inline]
     pub fn set_length(&mut self, len: u16) {
-        self.len = u16::to_be(len)
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.len, u16::to_be(len));
+        }
     }
 
     #[inline]
     pub fn checksum(&self) -> u16 {
-        u16::from_be(self.csum)
+        let raw_csum = unsafe { core::ptr::read_unaligned(&raw const self.csum) };
+        u16::from_be(raw_csum)
     }
 
     #[inline]
     pub fn set_checksum(&mut self, csum: u16) {
-        self.csum = u16::to_be(csum);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.csum, u16::to_be(csum));
+        }
     }
 }

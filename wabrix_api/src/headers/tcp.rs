@@ -69,9 +69,12 @@ impl EndOffset for TcpHeader {
         20
     }
 
-    #[inline] // I think this is not really the payload size, when we have Ethernet padding at the end of the frame, sta
-    fn payload_size(&self, frame_size: usize) -> usize {
-        frame_size - self.offset()
+    #[inline]
+    fn payload_size(&self, hint: usize) -> usize {
+        // - The hint parameter must be derived from the IP header length field
+        // - Subtracting the TCP offset yields the true L4 payload size
+        // - Using the raw hardware frame size introduces padding corruption
+        hint - self.offset()
     }
 
     #[inline]
@@ -88,229 +91,320 @@ impl TcpHeader {
 
     #[inline]
     pub fn src_port(&self) -> u16 {
-        u16::from_be(self.src_port)
+        // SAFETY:
+        // - Extracts the raw constant pointer to the packed field without creating an intermediate reference.
+        // - Performs a safe unaligned read to prevent hardware alignment faults.
+        let raw_port = unsafe { core::ptr::read_unaligned(&raw const self.src_port) };
+        u16::from_be(raw_port)
     }
 
     #[inline]
     pub fn dst_port(&self) -> u16 {
-        u16::from_be(self.dst_port)
+        let raw_port = unsafe { core::ptr::read_unaligned(&raw const self.dst_port) };
+        u16::from_be(raw_port)
     }
 
     #[inline]
     pub fn set_src_port(&mut self, port: u16) {
-        self.src_port = u16::to_be(port);
+        // SAFETY:
+        // - Extracts the raw mutable pointer to the packed field without creating a reference.
+        // - Performs a safe unaligned write directly to the memory address.
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.src_port, u16::to_be(port));
+        }
     }
 
     #[inline]
     pub fn incr_src_port(&mut self) {
-        self.src_port = u16::to_be(u16::from_be(self.src_port) + 1);
+        unsafe {
+            let current = core::ptr::read_unaligned(&raw const self.src_port);
+            core::ptr::write_unaligned(
+                &raw mut self.src_port,
+                u16::to_be(u16::from_be(current) + 1)
+            );
+        }
     }
 
     #[inline]
     pub fn set_dst_port(&mut self, port: u16) {
-        self.dst_port = u16::to_be(port);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.dst_port, u16::to_be(port));
+        }
     }
 
     #[inline]
     pub fn seq_num(&self) -> u32 {
-        u32::from_be(self.seq)
+        let raw_seq = unsafe { core::ptr::read_unaligned(&raw const self.seq) };
+        u32::from_be(raw_seq)
     }
 
     #[inline]
     pub fn set_seq_num(&mut self, seq: u32) {
-        self.seq = u32::to_be(seq);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.seq, u32::to_be(seq));
+        }
     }
 
     #[inline]
     pub fn ack_num(&self) -> u32 {
-        u32::from_be(self.ack)
+        let raw_ack = unsafe { core::ptr::read_unaligned(&raw const self.ack) };
+        u32::from_be(raw_ack)
     }
 
     #[inline]
     pub fn set_ack_num(&mut self, ack: u32) {
-        self.ack = u32::to_be(ack);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.ack, u32::to_be(ack));
+        }
     }
 
     #[inline]
     pub fn data_offset(&self) -> u8 {
-        (self.offset_to_ns & 0xf0) >> 4
+        let offset_to_ns = unsafe { core::ptr::read_unaligned(&raw const self.offset_to_ns) };
+        (offset_to_ns & 0xf0) >> 4
     }
 
     #[inline]
     pub fn set_data_offset(&mut self, offset: u8) {
         debug_assert!(offset <= 15, "TCP data offset exceeds 4 bits!");
-        self.offset_to_ns = (self.offset_to_ns & 0x0f) | (offset << 4);
+        unsafe {
+            let offset_to_ns = core::ptr::read_unaligned(&raw const self.offset_to_ns);
+            let blanked = offset_to_ns & 0x0f;
+            core::ptr::write_unaligned(&raw mut self.offset_to_ns, blanked | (offset << 4));
+        }
     }
 
-    // BEGIN FLAGS
     pub fn flags(&self) -> u8 {
-        self.flags
+        unsafe { core::ptr::read_unaligned(&raw const self.flags) }
     }
 
     pub fn set_flags(&mut self, flags: u8) {
-        self.flags = flags
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.flags, flags);
+        }
     }
 
-    // This is weird in being located outside the flags byte.
     /// ECN nonce concealment flag: RFC 3540.
     #[inline]
     pub fn ns_flag(&self) -> bool {
-        (self.offset_to_ns & 0x01) == 1
+        let offset_to_ns = unsafe { core::ptr::read_unaligned(&raw const self.offset_to_ns) };
+        (offset_to_ns & 0x01) == 1
     }
 
     #[inline]
     pub fn set_ns(&mut self) {
-        self.offset_to_ns |= 1
+        unsafe {
+            let offset_to_ns = core::ptr::read_unaligned(&raw const self.offset_to_ns);
+            core::ptr::write_unaligned(&raw mut self.offset_to_ns, offset_to_ns | 1);
+        }
     }
 
     #[inline]
     pub fn unset_ns(&mut self) {
-        self.offset_to_ns &= !0x1
+        unsafe {
+            let offset_to_ns = core::ptr::read_unaligned(&raw const self.offset_to_ns);
+            core::ptr::write_unaligned(&raw mut self.offset_to_ns, offset_to_ns & !0x1);
+        }
     }
 
     /// Congestion window reduction flag.
-    // TODO: Autogenerate after https://github.com/rust-lang/rust/issues/29599 is fixed.
     #[inline]
     pub fn cwr_flag(&self) -> bool {
-        (self.flags & CWR) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & CWR) != 0
     }
 
     /// Set CWR flag to 1.
     #[inline]
     pub fn set_cwr_flag(&mut self) {
-        self.flags |= CWR;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | CWR);
+        }
     }
 
     /// Set CWR flag to 0.
     #[inline]
     pub fn unset_cwr_flag(&mut self) {
-        self.flags &= !CWR;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !CWR);
+        }
     }
 
     /// ECN echo flag.
     #[inline]
     pub fn ece_flag(&self) -> bool {
-        (self.flags & ECE) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & ECE) != 0
     }
 
     /// Set ECE flag to 1.
     #[inline]
     pub fn set_ece_flag(&mut self) {
-        self.flags |= ECE;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | ECE);
+        }
     }
 
     /// Set ECE flag to 0.
     #[inline]
     pub fn unset_ece_flag(&mut self) {
-        self.flags &= !ECE;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !ECE);
+        }
     }
 
     /// Urgent pointer field is significant.
     #[inline]
     pub fn urg_flag(&self) -> bool {
-        (self.flags & URG) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & URG) != 0
     }
 
     /// Set URG flag to 1.
     #[inline]
     pub fn set_urg_flag(&mut self) {
-        self.flags |= URG;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | URG);
+        }
     }
 
     /// Set URG flag to 0.
     #[inline]
     pub fn unset_urg_flag(&mut self) {
-        self.flags &= !URG;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !URG);
+        }
     }
 
     /// Acknowledgment field is significant.
     #[inline]
     pub fn ack_flag(&self) -> bool {
-        (self.flags & ACK) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & ACK) != 0
     }
 
     /// Set ACK flag to 1.
     #[inline]
     pub fn set_ack_flag(&mut self) {
-        self.flags |= ACK;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | ACK);
+        }
     }
 
     /// Set ACK flag to 0.
     #[inline]
     pub fn unset_ack_flag(&mut self) {
-        self.flags &= !ACK;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !ACK);
+        }
     }
 
     /// Push function: Push buffered data to receiving application.
     #[inline]
     pub fn psh_flag(&self) -> bool {
-        (self.flags & PSH) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & PSH) != 0
     }
 
     /// Set PSH flag to 1.
     #[inline]
     pub fn set_psh_flag(&mut self) {
-        self.flags |= PSH;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | PSH);
+        }
     }
 
     /// Set PSH flag to 0.
     #[inline]
     pub fn unset_psh_flag(&mut self) {
-        self.flags &= !PSH;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !PSH);
+        }
     }
 
     /// Reset connection.
     #[inline]
     pub fn rst_flag(&self) -> bool {
-        (self.flags & RST) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & RST) != 0
     }
 
     /// Set RST flag to 1.
     #[inline]
     pub fn set_rst_flag(&mut self) {
-        self.flags |= RST;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | RST);
+        }
     }
 
     /// Set RST flag to 0.
     #[inline]
     pub fn unset_rst_flag(&mut self) {
-        self.flags &= !RST;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !RST);
+        }
     }
 
     /// Synchronize sequence number.
     #[inline]
     pub fn syn_flag(&self) -> bool {
-        (self.flags & SYN) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & SYN) != 0
     }
 
     /// Set SYN flag to 1.
     #[inline]
     pub fn set_syn_flag(&mut self) {
-        self.flags |= SYN;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | SYN);
+        }
     }
 
     /// Set SYN flag to 0.
     #[inline]
     pub fn unset_syn_flag(&mut self) {
-        self.flags &= !SYN;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !SYN);
+        }
     }
 
     /// No more data transfer from sender.
     #[inline]
     pub fn fin_flag(&self) -> bool {
-        (self.flags & FIN) != 0
+        let flags = unsafe { core::ptr::read_unaligned(&raw const self.flags) };
+        (flags & FIN) != 0
     }
 
     /// Set FIN flag to 1.
     #[inline]
     pub fn set_fin_flag(&mut self) {
-        self.flags |= FIN;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags | FIN);
+        }
     }
 
     /// Set FIN flag to 0.
     #[inline]
     pub fn unset_fin_flag(&mut self) {
-        self.flags &= !FIN;
+        unsafe {
+            let flags = core::ptr::read_unaligned(&raw const self.flags);
+            core::ptr::write_unaligned(&raw mut self.flags, flags & !FIN);
+        }
     }
 
     pub fn fmt_flags(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -344,47 +438,59 @@ impl TcpHeader {
         };
         write!(f, "|")
     }
-    // END FLAGS
 
     /// Receive window.
     #[inline]
     pub fn window_size(&self) -> u16 {
-        u16::from_be(self.window)
+        let raw_window = unsafe { core::ptr::read_unaligned(&raw const self.window) };
+        u16::from_be(raw_window)
     }
 
     #[inline]
     pub fn set_window_size(&mut self, wnd: u16) {
-        self.window = u16::to_be(wnd);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.window, u16::to_be(wnd));
+        }
     }
 
     /// Checksum
     #[inline]
     pub fn checksum(&self) -> u16 {
-        u16::from_be(self.csum)
+        let raw_csum = unsafe { core::ptr::read_unaligned(&raw const self.csum) };
+        u16::from_be(raw_csum)
     }
 
     #[inline]
     pub fn set_checksum(&mut self, csum: u16) {
-        self.csum = u16::to_be(csum);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.csum, u16::to_be(csum));
+        }
     }
 
     #[inline]
     pub fn update_checksum_incremental(&mut self, old_word: u16, new_word: u16) {
-        self.csum = u16::to_be(update_checksum_incremental(
-            u16::from_be(self.csum),
-            old_word,
-            new_word,
-        ));
+        unsafe {
+            let current_csum = core::ptr::read_unaligned(&raw const self.csum);
+            let new_csum = update_checksum_incremental(
+                u16::from_be(current_csum),
+                old_word,
+                new_word,
+            );
+            core::ptr::write_unaligned(&raw mut self.csum, u16::to_be(new_csum));
+        }
     }
 
     /// Urgent pointer
     #[inline]
     pub fn urgent(&self) -> u16 {
-        u16::from_be(self.urgent)
+        let raw_urgent = unsafe { core::ptr::read_unaligned(&raw const self.urgent) };
+        u16::from_be(raw_urgent)
     }
 
     #[inline]
     pub fn set_urgent(&mut self, urgent: u16) {
-        self.urgent = u16::to_be(urgent);
+        unsafe {
+            core::ptr::write_unaligned(&raw mut self.urgent, u16::to_be(urgent));
+        }
     }
 }

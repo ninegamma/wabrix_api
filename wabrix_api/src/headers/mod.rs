@@ -49,8 +49,6 @@ pub trait EndOffset: Send {
     fn header_kind(&self) -> HeaderKind;
 }
 
-//Replace the current, lifetime-bearing enum with a pointer-backed version.
-// New internal representation (no lifetime parameter)
 #[derive(Debug)]
 pub enum HeaderPtr {
     Null,
@@ -67,20 +65,14 @@ pub enum HeaderPtr {
 impl HeaderPtr {
     #[inline]
     /// # Safety
-    /// `ptr` must be a valid, properly aligned pointer to a `T` that lives at
-    /// least as long as the returned `HeaderPtr`. Callers uphold this by passing pointers
-    /// derived from live UMEM frame references during packet parsing.
-    pub unsafe fn new<T: EndOffset>(ptr: *mut T) -> HeaderPtr {
-        match (*ptr).header_kind() {
-            HeaderKind::Null => HeaderPtr::Null,
-            HeaderKind::Mac => HeaderPtr::Mac(ptr as *mut MacHeader),
-            HeaderKind::Ip => HeaderPtr::Ip(ptr as *mut IpHeader),
-            HeaderKind::Ipv6 => HeaderPtr::Ipv6(ptr as *mut Ipv6Header),
-            HeaderKind::Tcp => HeaderPtr::Tcp(ptr as *mut TcpHeader),
-            HeaderKind::Udp => HeaderPtr::Udp(ptr as *mut UdpHeader),
-            HeaderKind::Icmp => HeaderPtr::Icmp(ptr as *mut IcmpHeader),
-            HeaderKind::ArpIpv4 => HeaderPtr::ArpIpv4(ptr as *mut ArpIpv4Header),
-        }
+    /// `ptr` must be a valid pointer derived from a live UMEM frame reference.
+    ///
+    /// * Passing `kind` explicitly avoids dereferencing a potentially unaligned pointer
+    ///   to a packed struct, preventing Undefined Behavior.
+    /// * The caller must ensure that the provided `kind` matches the actual data
+    ///   layout at the given pointer.
+    pub unsafe fn new<T>(kind: HeaderKind, ptr: *mut T) -> HeaderPtr {
+        Self::from_kind_and_ptr(kind, ptr as *mut u8)
     }
 
     // Accessors create temporary borrows on demand (no persistent &mut stored).
@@ -269,15 +261,7 @@ impl HeaderPtr {
     }
 }
 
-// Preserve existing initialization behavior for arrays
-impl Clone for HeaderPtr {
-    fn clone(&self) -> Self {
-        HeaderPtr::Null
-    }
-}
-
-// Keep the public name and lifetime parameter to avoid signature churn
-pub type Header = HeaderPtr; // 'a is unused but preserves existing signatures
+pub type Header = HeaderPtr;
 
 impl HeaderPtr {
     #[inline]

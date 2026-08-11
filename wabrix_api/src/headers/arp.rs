@@ -58,28 +58,42 @@ impl fmt::Display for ArpIpv4Header {
 impl ArpIpv4Header {
     #[inline]
     pub fn hw_type(&self) -> u16 {
-        u16::from_be(self.hw_type)
+        // SAFETY:
+        // - Extracts the raw constant pointer to the packed field without creating an intermediate reference.
+        // - Performs a safe unaligned read to prevent hardware alignment faults.
+        let raw_val = unsafe { core::ptr::read_unaligned(&raw const self.hw_type) };
+        u16::from_be(raw_val)
     }
+
     #[inline]
     pub fn proto_etype(&self) -> u16 {
-        u16::from_be(self.proto_etype)
+        let raw_val = unsafe { core::ptr::read_unaligned(&raw const self.proto_etype) };
+        u16::from_be(raw_val)
     }
+
     #[inline]
     pub fn operation(&self) -> u16 {
-        u16::from_be(self.operation)
+        let raw_val = unsafe { core::ptr::read_unaligned(&raw const self.operation) };
+        u16::from_be(raw_val)
     }
+
     #[inline]
     pub fn sender_proto_addr(&self) -> u32 {
-        u32::from_be(self.sender_proto_addr)
+        let raw_val = unsafe { core::ptr::read_unaligned(&raw const self.sender_proto_addr) };
+        u32::from_be(raw_val)
     }
+
     #[inline]
     pub fn target_proto_addr(&self) -> u32 {
-        u32::from_be(self.target_proto_addr)
+        let raw_val = unsafe { core::ptr::read_unaligned(&raw const self.target_proto_addr) };
+        u32::from_be(raw_val)
     }
+
     #[inline]
     pub fn target_ip_addr(&self) -> Ipv4Addr {
         Ipv4Addr::from(self.target_proto_addr())
     }
+
     #[inline]
     pub fn sender_ip_addr(&self) -> Ipv4Addr {
         Ipv4Addr::from(self.sender_proto_addr())
