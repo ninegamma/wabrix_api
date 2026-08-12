@@ -1,4 +1,3 @@
-use super::{EndOffset, HeaderKind};
 use byteorder::{BigEndian, ByteOrder};
 use core::fmt;
 use core::hash::Hasher;
