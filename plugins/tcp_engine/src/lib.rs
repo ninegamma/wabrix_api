@@ -134,6 +134,7 @@ pub fn init_logging() {
 }
 
 const MAX_CONNECTIONS: usize = 524_288;
+//const MAX_CONNECTIONS: usize = 1_048_576;
 
 fn init_state_machine(tcp_node_name: String) {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
