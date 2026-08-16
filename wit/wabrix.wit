@@ -2,6 +2,12 @@ package wabrix:plugins@0.1.0;
     
 /// The interface for nodes that inspect and modify packets, e.g. running a TCP stack.
 interface packet-engine {
+    /// Exact timer workload requested for the next batch.
+    record timer-plan {
+        timeout-frames: u32,
+        syn-frames: u32,
+    }
+
     /// Called once at startup with admin key/value data from the node config (wasm_data field)
     init-data: func(data: list<tuple<string, string>>, tsc-frequency: u64) -> bool;
 
@@ -10,8 +16,8 @@ interface packet-engine {
     /// writes actions/new_lengths into the same mailbox and returns a status code (0 = OK).
     process-batch: func(batch-size: u32, partition-offset: u32, mailbox-offset: u32) -> u32;
 
-    /// Process timers and return the number of frames that are needed for the timeouts
-    process-timers: func(current-tsc: u64) -> u32;
+    /// Process timers and return the timeout/SYN frame split for the next batch.
+    process-timers: func(current-tsc: u64) -> timer-plan;
 
     // The universal control event receiver
     on-control-event: func(opcode: u32, payload: list<u8>) -> bool;

@@ -29,7 +29,8 @@ pub struct WPdu {
     pub frame_size_log2: u8, // 1 byte - log2(frame_size) for bit-shift calculations
     owner_id: u8,            // 1 byte
     pub flags: u8,           // 1 byte
-    pub _padding: [u8; 9],   // 9 byte
+    pub timer_kind: u8,      // 1 byte: TIMER_KIND_* classification
+    pub _padding: [u8; 8],   // 8 byte reserved padding
 
     /// 8 Bytes: Telemetry
     pub timestamp: u64,
@@ -71,7 +72,8 @@ impl Default for WPdu {
             frame_size_log2: 11, // 2^11 = 2048 (common default frame size)
             owner_id: 0,
             flags: 0,
-            _padding: [0; 9],
+            timer_kind: 0,
+            _padding: [0; 8],
             timestamp: 0,
         }
     }
@@ -115,6 +117,18 @@ impl WPdu {
     #[inline]
     pub fn owner_id(&self) -> u8 {
         self.owner_id
+    }
+
+    /// Returns the host/plugin timer classification stored in reserved padding.
+    #[inline(always)]
+    pub fn timer_kind(&self) -> u8 {
+        self.timer_kind
+    }
+
+    /// Sets the host/plugin timer classification without changing WPdu layout.
+    #[inline(always)]
+    pub fn set_timer_kind(&mut self, kind: u8) {
+        self.timer_kind = kind;
     }
 
     #[inline]

@@ -22,6 +22,12 @@ pub mod tcp_common;
 /// The maximum number of packets in a single batch.
 pub const MAX_BATCH_SIZE: usize = 512;
 
+/// Timer frame kinds stored in the reserved WPdu padding byte.
+pub const TIMER_KIND_NONE: u8 = 0;
+pub const TIMER_KIND_TIMEOUT: u8 = 1;
+pub const TIMER_KIND_SYN: u8 = 2;
+
+
 pub const TELEMETRY_FLAG: u32 = 1 << 8; // Bit 8
 
 /// Strongly typed enum for the reserved standard opcodes (0x0000 - 0x0FFF).

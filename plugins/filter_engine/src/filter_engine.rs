@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use exports::wabrix::plugins::packet_engine::Guest;
+use exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
 use postcard;
 use wabrix::plugins::logging;
 use wabrix_api::mailbox_api::MailboxBatch;
@@ -157,8 +157,11 @@ impl Guest for FilterEngine {
         processed_count
     }
 
-    fn process_timers(_current_tsc: u64) -> u32 {
-        0
+    fn process_timers(_current_tsc: u64) -> TimerPlan {
+        TimerPlan {
+            timeout_frames: 0,
+            syn_frames: 0,
+        }
     }
 
     // Intercepts control events to modify the active DPI signature without restarting

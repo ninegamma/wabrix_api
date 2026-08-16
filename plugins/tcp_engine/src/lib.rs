@@ -6,13 +6,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use crate::exports::wabrix::plugins::packet_engine::Guest;
+use crate::exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
 use crate::wabrix::plugins::logging;
 use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
 use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::packet::Packet;
-use wabrix_api::{HotWasmPayload, PluginOpcode, StandardOpcode};
+use wabrix_api::{
+    HotWasmPayload, PluginOpcode, StandardOpcode, MAX_BATCH_SIZE, TIMER_KIND_NONE,
+    TIMER_KIND_TIMEOUT,
+};
 
 use wabrix_api::tcp_common::{
     run_tcp_state_machine, write_tcp_reply, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
@@ -89,6 +92,9 @@ static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
 // Replaced AtomicU64 and Mutex<u64> with WasmValue (Instant access)
 static CURRENT_TSC: WasmValue<u64> = WasmValue::new(0);
 static LAST_TIMEOUT_SCAN: WasmValue<u64> = WasmValue::new(0);
+static RUN_START_TSC: WasmValue<u64> = WasmValue::new(0);
+static LAST_TIMER_LOG_TSC: WasmValue<u64> = WasmValue::new(0);
+
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
@@ -264,7 +270,7 @@ impl Guest for TcpEngine {
         // Fast-Path Bypass
         if local_config.bypass {
             for mut packet in batch.iter_mut() {
-                let action = if packet.is_a_tick() {
+                let action = if packet.tick_kind().is_some() {
                     inc_stat!(STAT_DROP);
                     inc_stat!(STAT_TICK_DROP);
                     ROUTE_DROP
@@ -289,16 +295,22 @@ impl Guest for TcpEngine {
         };
 
         for mut packet in batch.iter_mut() {
-            let (action, _len) = if packet.is_a_tick() {
+            let tick_kind = packet.tick_kind();
+            let is_tick = tick_kind.is_some();
+            let timer_kind = tick_kind.unwrap_or(TIMER_KIND_NONE);
+
+            let (action, _len) = if is_tick {
                 log::trace!("process_batch: tick");
                 let mut a = ROUTE_DROP;
                 let mut l = 64u32;
                 let mut generated_reply = false;
 
                 // PRIORITY 1: Process Timeout Teardowns
-                let pending_timeout = {
+                let pending_timeout = if timer_kind == TIMER_KIND_TIMEOUT {
                     let mut queue = TIMEOUT_QUEUE.borrow_mut();
                     queue.pop()
+                } else {
+                    None
                 };
 
                 if let Some(flow_key) = pending_timeout {
@@ -365,7 +377,7 @@ impl Guest for TcpEngine {
                 }
 
                 // PRIORITY 2: Generate new SYNs
-                if !generated_reply {
+                if !generated_reply && timer_kind != TIMER_KIND_TIMEOUT {
                     log::trace!("process_batch: generating new SYN");
                     let syn_rate = local_config.syn_rate.unwrap_or(0);
                     if syn_rate > 0 {
@@ -460,16 +472,31 @@ impl Guest for TcpEngine {
         processed_count
     }
 
-    fn process_timers(current_tsc: u64) -> u32 {
+    fn process_timers(current_tsc: u64) -> TimerPlan {
         // Share time with process_batch
         CURRENT_TSC.set(current_tsc);
 
-        let config = CONFIG.borrow().clone().unwrap_or_default();
+        if RUN_START_TSC.get() == 0 {
+            RUN_START_TSC.set(current_tsc);
+        }
+
+        // Keep the configuration borrowed for the duration of this read-only
+        // operation. Cloning `EngineConfig` here would clone its optional
+        // node name on every timer callback.
+        let config_guard = CONFIG.borrow();
+        let Some(config) = config_guard.as_ref() else {
+            return TimerPlan {
+                timeout_frames: 0,
+                syn_frames: 0,
+            };
+        };
         let tsc_freq = config.tsc_frequency;
-        let mut frames_to_request = 0;
 
         if tsc_freq == 0 {
-            return 0;
+            return TimerPlan {
+                timeout_frames: 0,
+                syn_frames: 0,
+            };
         }
 
         // =================================================================
@@ -498,12 +525,18 @@ impl Guest for TcpEngine {
                 }
             }
         }
-        frames_to_request += TIMEOUT_QUEUE.borrow().len() as u32;
+        // Keep the pending count separate from the count that will be
+        // scheduled below. The allocator reserves capacity for both timeout
+        // cleanup and SYN generation, then fills any remaining slots.
+        let pending_timeout_frames = TIMEOUT_QUEUE.borrow().len() as u32;
 
         // =================================================================
         // 2. SYN GENERATOR
         // =================================================================
         let syn_rate = config.syn_rate.unwrap_or(0);
+        let mut syn_delta_tsc = 0;
+        let mut desired_syn_frames = 0;
+        let mut syn_accumulator = 0;
         if syn_rate > 0 {
             let mut gen = SYN_GEN.borrow_mut();
 
@@ -519,6 +552,7 @@ impl Guest for TcpEngine {
                 }
                 let delta_tsc = current_tsc.saturating_sub(gen.last_tsc);
                 gen.last_tsc = current_tsc;
+                syn_delta_tsc = delta_tsc;
 
                 gen.cycle_accumulator += (delta_tsc as u128) * (syn_rate as u128);
                 let mut syn_frames = (gen.cycle_accumulator / (tsc_freq as u128)) as u32;
@@ -529,7 +563,7 @@ impl Guest for TcpEngine {
                         syn_frames = remaining as u32;
                     }
                 }
-                gen.cycle_accumulator %= tsc_freq as u128;
+                desired_syn_frames = syn_frames;
 
                 log::trace!(
                     "process_timers: syn_frames= {}, gen.syns_sent= {}, max_syns= {:?}",
@@ -537,10 +571,79 @@ impl Guest for TcpEngine {
                     gen.syns_sent,
                     config.syn_limit
                 );
-                frames_to_request += syn_frames;
+                // The accumulator is reduced after the fair allocation below
+                // so SYN credit that does not fit in this batch is retained.
             }
         }
-        frames_to_request
+
+        let max_batch = MAX_BATCH_SIZE as u32;
+        let desired_timeout_frames = pending_timeout_frames.min(max_batch);
+        let desired_syn_frames = desired_syn_frames.min(max_batch);
+
+        let (timeout_frames, syn_frames) =
+            if desired_timeout_frames.saturating_add(desired_syn_frames) <= max_batch {
+                (desired_timeout_frames, desired_syn_frames)
+            } else {
+                // Give each workload a guaranteed share when both are backlogged:
+                // up to two thirds for timeout cleanup and at least one third for
+                // SYNs. Any unused portion of either share is given to the other.
+                let mut timeout_frames = desired_timeout_frames.min(2 * max_batch / 3);
+                let mut syn_frames = desired_syn_frames.min(max_batch - timeout_frames);
+
+                let mut remaining = max_batch - timeout_frames - syn_frames;
+                let extra_timeout = (desired_timeout_frames - timeout_frames).min(remaining);
+                timeout_frames += extra_timeout;
+                remaining -= extra_timeout;
+                syn_frames += (desired_syn_frames - syn_frames).min(remaining);
+                (timeout_frames, syn_frames)
+            };
+
+        if syn_rate > 0 {
+            let mut gen = SYN_GEN.borrow_mut();
+            gen.cycle_accumulator = gen
+                .cycle_accumulator
+                .saturating_sub((syn_frames as u128) * (tsc_freq as u128));
+            syn_accumulator = gen.cycle_accumulator;
+        }
+
+        let frames_to_request = timeout_frames + syn_frames;
+        let potential_log = syn_rate > 0
+            && ((pending_timeout_frames > (20 * MAX_BATCH_SIZE) as u32)
+                || (syn_frames >= desired_syn_frames));
+
+        if potential_log {
+            let last_timer_log_tsc = LAST_TIMER_LOG_TSC.get();
+            if last_timer_log_tsc == 0 || current_tsc.saturating_sub(last_timer_log_tsc) >= 30*tsc_freq
+            {
+                LAST_TIMER_LOG_TSC.set(current_tsc);
+                let timestamp_micros = if tsc_freq > 0 {
+                    (current_tsc.saturating_sub(RUN_START_TSC.get()) as u128 * 1_000_000)
+                        / tsc_freq as u128
+                } else {
+                    0
+                };
+                let timestamp_ms = timestamp_micros / 1_000;
+                let timestamp_ms_fraction = timestamp_micros % 1_000;
+                let delta_ms = syn_delta_tsc as f64 * 1_000.0 / tsc_freq as f64;
+                log::debug!(
+                    "process_timers: timestamp_ms={}.{:03}, delta_ms={:.3}, syn_frames={}, desired_syn_frames={}, syn_accumulator={}, timeout_frames={}, pending_timeout_frames={}, total_frames={}",
+                    timestamp_ms,
+                    timestamp_ms_fraction,
+                    delta_ms,
+                    syn_frames,
+                    desired_syn_frames,
+                    syn_accumulator,
+                    timeout_frames,
+                    pending_timeout_frames,
+                    frames_to_request
+                );
+            }
+        }
+
+        TimerPlan {
+            timeout_frames,
+            syn_frames,
+        }
     }
 
     // Inside the Wasm plugin code

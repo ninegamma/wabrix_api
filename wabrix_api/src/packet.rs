@@ -69,6 +69,25 @@ impl<'a> Packet<'a> {
         self.pdu.is_a_tick(self.umem_base)
     }
 
+    /// Returns the timer kind when this packet is a timer/control tick.
+    ///
+    /// The EtherType is the packet-level marker, while `timer_kind` identifies
+    /// the specific timer operation. Keeping both checks here prevents callers
+    /// from accidentally interpreting a normal packet's metadata as a timer.
+    #[inline(always)]
+    pub fn tick_kind(&self) -> Option<u8> {
+        if self.pdu.is_a_tick(self.umem_base) {
+            Some(self.pdu.timer_kind())
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn timer_kind(&self) -> u8 {
+        self.pdu.timer_kind()
+    }
+
     #[inline(always)]
     pub fn data_len(&self) -> u32 {
         self.pdu.data_len()
