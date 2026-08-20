@@ -85,6 +85,8 @@ pub struct ConnectionPool {
 
     // - Suppress repeated "pool full" log spam: true while pool is at capacity
     pool_full_logged: bool,
+    // Number of failed insert attempts in the current full-pool episode.
+    pool_full_dropped: u64,
 }
 
 impl ConnectionPool {
@@ -99,6 +101,7 @@ impl ConnectionPool {
             free_head: NULL_NODE,
             watermark: 0,
             pool_full_logged: false,
+            pool_full_dropped: 0,
         }
     }
 
@@ -109,6 +112,8 @@ impl ConnectionPool {
         self.tail = NULL_NODE;
         self.free_head = NULL_NODE;
         self.watermark = 0;
+        self.pool_full_logged = false;
+        self.pool_full_dropped = 0;
     }
 
     /// O(1) Unlink a node from its current position in the linked list
@@ -196,9 +201,15 @@ impl ConnectionPool {
         } else {
             // SAFETY VALVE: Prevent Wasm OOM by stopping vector reallocation
             if self.arena.len() == self.arena.capacity() {
-                if !self.pool_full_logged {
+                self.pool_full_dropped = self.pool_full_dropped.saturating_add(1);
+                if !self.pool_full_logged || self.pool_full_dropped.is_multiple_of(5000) {
                     self.pool_full_logged = true;
-                    log::warn!("TCP node {}: connection pool full ({} slots) — new connections dropped until pool drains", self.tcp_node_name, self.arena.capacity());
+                    log::warn!(
+                        "TCP node {}: connection pool full ({} slots) — {} new connections dropped until pool drains",
+                        self.tcp_node_name,
+                        self.arena.capacity(),
+                        self.pool_full_dropped
+                    );
                 }
                 return false;
             }
@@ -260,6 +271,7 @@ impl ConnectionPool {
             self.free_head = index;
             // Allow the "pool full" warning to fire again once capacity is available
             self.pool_full_logged = false;
+            self.pool_full_dropped = 0;
         }
     }
 
