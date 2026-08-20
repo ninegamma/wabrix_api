@@ -4,11 +4,10 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
-
 use crate::exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
 use crate::wabrix::plugins::logging;
 use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
+use wabrix_api::engine_common::{handle_control_event, ControlResult, WasmCell, WasmValue};
 use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::packet::Packet;
@@ -36,46 +35,9 @@ wit_bindgen::generate!({
 
 /// A zero-cost, single-threaded state container for WASM.
 /// Uses `RefCell` to prevent re-entrancy panics, but uses NO ATOMICS.
-pub struct WasmCell<T>(RefCell<T>);
-// SAFETY: WASM is single-threaded by specification; there is no concurrent access to these
-// statics. `Sync` is needed to place `WasmCell` in a `static`, but no thread can ever
-// observe a data race in this environment.
-unsafe impl<T> Sync for WasmCell<T> {}
-
-impl<T> WasmCell<T> {
-    pub const fn new(value: T) -> Self {
-        Self(RefCell::new(value))
-    }
-    pub fn borrow_mut(&self) -> core::cell::RefMut<'_, T> {
-        self.0.borrow_mut()
-    }
-    pub fn borrow(&self) -> core::cell::Ref<'_, T> {
-        self.0.borrow()
-    }
-}
-
+ 
 /// An even faster container for simple Copy types (like u64).
 /// Uses `Cell`, which doesn't even have a borrow counter. Absolute zero overhead.
-pub struct WasmValue<T>(Cell<T>);
-// SAFETY: Same as `WasmCell` — WASM is single-threaded, so `Sync` cannot be violated.
-// `Cell<T>` itself is not `Sync`, but no concurrent access is possible in this runtime.
-unsafe impl<T> Sync for WasmValue<T> {}
-
-impl<T> WasmValue<T> {
-    pub const fn new(value: T) -> Self {
-        Self(Cell::new(value))
-    }
-    pub fn get(&self) -> T
-    where
-        T: Copy,
-    {
-        self.0.get()
-    }
-    pub fn set(&self, val: T) {
-        self.0.set(val)
-    }
-}
-
 static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<TimeoutStack> = WasmCell::new(TimeoutStack::new());
@@ -649,6 +611,16 @@ impl Guest for TcpEngine {
     // Inside the Wasm plugin code
 
     fn on_control_event(raw_opcode: u32, payload: Vec<u8>) -> bool {
+        return match handle_control_event(raw_opcode, &payload, &CONFIG, &SYN_GEN) {
+            ControlResult::Flush(mode) => {
+                flush_state(mode);
+                true
+            }
+            ControlResult::Handled => true,
+            ControlResult::Invalid => false,
+        };
+
+        #[allow(unreachable_code)]
         let opcode = PluginOpcode::from(raw_opcode);
 
         match opcode {

@@ -15,6 +15,7 @@ mod wpdu_impl;
 // Declare the routing module as public.
 // (It will decide internally what to actually export).
 pub mod connections;
+pub mod engine_common;
 pub mod exports;
 mod hstack;
 pub mod tcp_common;
