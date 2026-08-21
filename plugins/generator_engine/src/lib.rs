@@ -124,7 +124,7 @@ fn prepare_syn_packet(
     packet.resize_payload(packet_len);
 }
 
-#[inline(always)]
+#[inline(never)]
 fn prepare_udp_packet(
     packet: &mut MailboxPacket<'_>,
     gen: &mut SynGenerator,
@@ -148,6 +148,117 @@ fn prepare_udp_packet(
     let packet_len =
         unsafe { write_udp_packet(data_ptr, src_mac, dst_mac, src_ip, src_port, dst_ip, 80) };
     packet.resize_payload(packet_len);
+}
+
+#[derive(Clone, Copy)]
+struct GeneratorBatchConfig {
+    generation_rate: u64,
+    generation_limit: Option<u64>,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    tsc_frequency: u64,
+}
+
+#[inline(always)]
+fn process_batch_for_protocol<const UDP: bool>(
+    batch_size: u32,
+    partition_offset: u32,
+    mailbox_offset: u32,
+    config: GeneratorBatchConfig,
+) -> u32 {
+    let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+    let mut stats = TCP_STATS.borrow_mut();
+
+    for mut packet in batch.iter_mut() {
+        let action = if let Some(timer_kind) = packet.tick_kind() {
+            let mut generated_reply = false;
+
+            if timer_kind != TIMER_KIND_TIMEOUT && config.generation_rate > 0 {
+                let mut gen = SYN_GEN.borrow_mut();
+                let allowed_to_send = gen.activated
+                    && match config.generation_limit {
+                        Some(max_packets) => gen.syns_sent < max_packets || max_packets == 0,
+                        None => true,
+                    };
+
+                if allowed_to_send {
+                    let packet_start_tsc = CURRENT_TSC.get();
+                    let src_ip = u32::from_be_bytes(config.src_ip);
+                    let dst_ip = u32::from_be_bytes(config.dst_ip);
+
+                    if UDP {
+                        prepare_udp_packet(
+                            &mut packet,
+                            &mut gen,
+                            config.src_mac,
+                            config.dst_mac,
+                            src_ip,
+                            dst_ip,
+                        );
+                    } else {
+                        prepare_syn_packet(
+                            &mut packet,
+                            &mut gen,
+                            config.src_mac,
+                            config.dst_mac,
+                            src_ip,
+                            dst_ip,
+                        );
+                    }
+
+                    let packet_end_tsc = CURRENT_TSC.get();
+                    if gen.syns_sent == 1 {
+                        GENERATION_START_TSC.set(packet_start_tsc);
+                    }
+
+                    let generation_complete = config
+                        .generation_limit
+                        .is_some_and(|limit| limit > 0 && gen.syns_sent == limit);
+                    if generation_complete {
+                        let start_tsc = GENERATION_START_TSC.get();
+                        let elapsed_tsc = packet_end_tsc.saturating_sub(start_tsc);
+                        let elapsed_micros = if config.tsc_frequency > 0 {
+                            (elapsed_tsc as u128 * 1_000_000) / config.tsc_frequency as u128
+                        } else {
+                            0
+                        };
+                        let packets = gen.syns_sent as u128;
+                        let packets_per_second = if elapsed_micros > 0 {
+                            packets * 1_000_000 / elapsed_micros
+                        } else {
+                            0
+                        };
+
+                        log::info!(
+                            "generation run complete: packets={}, elapsed={}us, speed={} packets/s",
+                            packets.separated_string(),
+                            elapsed_micros.separated_string(),
+                            packets_per_second.separated_string()
+                        );
+                    }
+
+                    stats[STAT_SENT_SYN] += 1;
+                    generated_reply = true;
+                }
+            }
+
+            if !generated_reply {
+                stats[STAT_DROP] += 1;
+                stats[STAT_TICK_DROP] += 1;
+                ROUTE_DROP
+            } else {
+                ROUTE_TX
+            }
+        } else {
+            stats[STAT_TO_LINUX] += 1;
+            ROUTE_LINUX
+        };
+        packet.set_action(action);
+    }
+
+    batch_size
 }
 
 struct GeneratorEngine;
@@ -178,126 +289,49 @@ impl Guest for GeneratorEngine {
     }
 
     fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
-        let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
         let config_guard = CONFIG.borrow();
-        let (
-            protocol,
-            generation_rate,
-            generation_limit,
-            src_ip,
-            dst_ip,
-            src_mac,
-            dst_mac,
-            tsc_frequency,
-        ) = config_guard.as_ref().map_or(
+        let (protocol, config) = config_guard.as_ref().map_or(
             (
                 GeneratorProtocol::Syn,
-                0,
-                None,
-                [0; 4],
-                [0; 4],
-                [0; 6],
-                [0xff; 6],
-                0,
+                GeneratorBatchConfig {
+                    generation_rate: 0,
+                    generation_limit: None,
+                    src_ip: [0; 4],
+                    dst_ip: [0; 4],
+                    src_mac: [0; 6],
+                    dst_mac: [0xff; 6],
+                    tsc_frequency: 0,
+                },
             ),
             |config| {
                 (
                     config.protocol,
-                    config.generation_rate.unwrap_or(0),
-                    config.generation_limit,
-                    config.src_ip.unwrap_or([0; 4]),
-                    config.dst_ip.unwrap_or([0; 4]),
-                    config.src_mac.unwrap_or([0; 6]),
-                    config.dst_mac.unwrap_or([0xff; 6]),
-                    config.tsc_frequency,
+                    GeneratorBatchConfig {
+                        generation_rate: config.generation_rate.unwrap_or(0),
+                        generation_limit: config.generation_limit,
+                        src_ip: config.src_ip.unwrap_or([0; 4]),
+                        dst_ip: config.dst_ip.unwrap_or([0; 4]),
+                        src_mac: config.src_mac.unwrap_or([0; 6]),
+                        dst_mac: config.dst_mac.unwrap_or([0xff; 6]),
+                        tsc_frequency: config.tsc_frequency,
+                    },
                 )
             },
         );
-        let mut stats = TCP_STATS.borrow_mut();
-        for mut packet in batch.iter_mut() {
-            let action = if let Some(timer_kind) = packet.tick_kind() {
-                let mut a = ROUTE_DROP;
-                let mut generated_reply = false;
-
-                if timer_kind != TIMER_KIND_TIMEOUT && generation_rate > 0 {
-                    let mut gen = SYN_GEN.borrow_mut();
-                    let allowed_to_send = gen.activated
-                        && match generation_limit {
-                            Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
-                            None => true,
-                        };
-
-                    if allowed_to_send {
-                        let packet_start_tsc = CURRENT_TSC.get();
-                        let their_ip = u32::from_be_bytes(dst_ip);
-                        match protocol {
-                            GeneratorProtocol::Syn => prepare_syn_packet(
-                                &mut packet,
-                                &mut gen,
-                                src_mac,
-                                dst_mac,
-                                u32::from_be_bytes(src_ip),
-                                their_ip,
-                            ),
-                            GeneratorProtocol::Udp => prepare_udp_packet(
-                                &mut packet,
-                                &mut gen,
-                                src_mac,
-                                dst_mac,
-                                u32::from_be_bytes(src_ip),
-                                their_ip,
-                            ),
-                        }
-
-                        let packet_end_tsc = CURRENT_TSC.get();
-                        if gen.syns_sent == 1 {
-                            GENERATION_START_TSC.set(packet_start_tsc);
-                        }
-
-                        let generation_complete = generation_limit
-                            .is_some_and(|limit| limit > 0 && gen.syns_sent == limit);
-                        if generation_complete {
-                            let start_tsc = GENERATION_START_TSC.get();
-                            let elapsed_tsc = packet_end_tsc.saturating_sub(start_tsc);
-                            let elapsed_micros = if tsc_frequency > 0 {
-                                (elapsed_tsc as u128 * 1_000_000) / tsc_frequency as u128
-                            } else {
-                                0
-                            };
-                            let packets = gen.syns_sent as u128;
-                            let packets_per_second = if elapsed_micros > 0 {
-                                packets * 1_000_000 / elapsed_micros
-                            } else {
-                                0
-                            };
-
-                            log::info!(
-                                    "generation run complete: packets={}, elapsed={}us, speed={} packets/s",
-                                    packets.separated_string(),
-                                    elapsed_micros.separated_string(),
-                                    packets_per_second.separated_string()
-                                );
-                        }
-
-                        stats[STAT_SENT_SYN] += 1;
-                        a = ROUTE_TX;
-                        generated_reply = true;
-                    }
-                }
-
-                if !generated_reply {
-                    stats[STAT_DROP] += 1;
-                    stats[STAT_TICK_DROP] += 1;
-                    a = ROUTE_DROP;
-                }
-                a
-            } else {
-                stats[STAT_TO_LINUX] += 1;
-                ROUTE_LINUX
-            };
-            packet.set_action(action);
+        match protocol {
+            GeneratorProtocol::Syn => process_batch_for_protocol::<false>(
+                batch_size,
+                partition_offset,
+                mailbox_offset,
+                config,
+            ),
+            GeneratorProtocol::Udp => process_batch_for_protocol::<true>(
+                batch_size,
+                partition_offset,
+                mailbox_offset,
+                config,
+            ),
         }
-        batch_size
     }
 
     fn process_timers(current_tsc: u64) -> TimerPlan {
