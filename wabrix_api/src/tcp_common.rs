@@ -1,11 +1,13 @@
 use alloc::string::String;
 use core::mem::size_of;
+use core::ops::{Deref, DerefMut};
 use core::ptr;
 use macaddr::MacAddr6;
 use network_types::eth::EtherType;
 
 use crate::connections::{ConnectionNode, FlowKey, TcpState};
-use crate::headers::{IpHeader, MacHeader, TcpHeader};
+use crate::headers::{IpHeader, MacHeader, TcpHeader, UdpHeader};
+use crate::headers::check::ipv4_checksum;
 use crate::helpers::update_tcp_checksum;
 
 // Standard TCP Flags
@@ -16,6 +18,7 @@ pub const FLAG_ACK: u8 = 0x10;
 
 pub const PORT_START_RANGE: u16 = 10000;
 pub const PORT_END_RANGE: u16 = 65535;
+pub const UDP_PAYLOAD: &[u8] = b"Hello World";
 pub const MAX_CONNECTIONS: usize = 1_048_576;
 pub const MAX_TIMEOUTS: usize = 262_144;
 
@@ -44,19 +47,80 @@ pub const STAT_TO_LINUX: usize = 20;
 pub const STAT_DROP: usize = 21;
 pub const STAT_COUNT: usize = 22;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GeneratorProtocol {
+    #[default]
+    Syn,
+    Udp,
+}
+
+impl GeneratorProtocol {
+    #[inline]
+    pub fn parse(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("SYN") {
+            Some(Self::Syn)
+        } else if value.eq_ignore_ascii_case("UDP") {
+            Some(Self::Udp)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Default)]
-pub struct EngineConfig {
+pub struct CommonEngineConfig {
     pub name: Option<String>,
     pub src_mac: Option<[u8; 6]>,
     pub dst_mac: Option<[u8; 6]>,
     pub src_ip: Option<[u8; 4]>,
     pub dst_ip: Option<[u8; 4]>,
     pub rng_seed: Option<u32>,
-    pub syn_rate: Option<u64>,
     pub tsc_frequency: u64,
+    pub bypass: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct TcpEngineConfig {
+    pub common: CommonEngineConfig,
+    pub syn_rate: Option<u64>,
     pub syn_limit: Option<u64>,
     pub close_timeout_millis: Option<u64>,
-    pub bypass: bool,
+}
+
+impl Deref for TcpEngineConfig {
+    type Target = CommonEngineConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl DerefMut for TcpEngineConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.common
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct GeneratorConfig {
+    pub common: CommonEngineConfig,
+    pub protocol: GeneratorProtocol,
+    pub generation_rate: Option<u64>,
+    pub generation_limit: Option<u64>,
+}
+
+impl Deref for GeneratorConfig {
+    type Target = CommonEngineConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+
+impl DerefMut for GeneratorConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.common
+    }
 }
 
 pub struct SynGenerator {
@@ -209,6 +273,75 @@ pub unsafe fn write_tcp_reply(
     ptr::copy_nonoverlapping(&tcp, data_ptr.add(mac_size + ip_size) as *mut TcpHeader, 1);
 
     (mac_size + ip_size + tcp_size) as u32
+}
+
+/// Formats an Ethernet/IPv4/UDP packet with the fixed generator payload.
+/// Returns the total byte length of the written packet.
+// SAFETY: The caller guarantees that `data_ptr` points to an exclusively-owned
+// frame with enough capacity for the Ethernet, IPv4, UDP, and payload bytes.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn write_udp_packet(
+    data_ptr: *mut u8,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: u32,
+    src_port: u16,
+    dst_ip: u32,
+    dst_port: u16,
+) -> u32 {
+    let mut mac = MacHeader::new();
+    mac.src = MacAddr6::new(
+        src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5],
+    );
+    mac.dst = MacAddr6::new(
+        dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5],
+    );
+    mac.set_ethertype(EtherType::Ipv4);
+
+    let udp_len = (size_of::<UdpHeader>() + UDP_PAYLOAD.len()) as u16;
+    let ip_len = (size_of::<IpHeader>() + udp_len as usize) as u16;
+
+    let mut ip = IpHeader::new();
+    ip.set_src(src_ip);
+    ip.set_dst(dst_ip);
+    ip.set_ttl(64);
+    ip.set_version(4);
+    ip.set_protocol(17);
+    ip.set_ihl(5);
+    ip.set_length(ip_len);
+    ip.set_flags(0x2);
+    ip.update_checksum();
+
+    let mut udp = UdpHeader::new();
+    udp.set_src_port(src_port);
+    udp.set_dst_port(dst_port);
+    udp.set_length(udp_len);
+    udp.set_checksum(0);
+
+    let mac_size = size_of::<MacHeader>();
+    let ip_size = size_of::<IpHeader>();
+    let udp_size = size_of::<UdpHeader>();
+    let udp_ptr = data_ptr.add(mac_size + ip_size);
+
+    // SAFETY: The caller-provided frame has capacity for the exact packet;
+    // the three writes target disjoint, correctly-sized regions in that frame.
+    ptr::copy_nonoverlapping(&mac, data_ptr as *mut MacHeader, 1);
+    ptr::copy_nonoverlapping(
+        &ip,
+        data_ptr.add(mac_size) as *mut IpHeader,
+        1,
+    );
+    ptr::copy_nonoverlapping(&udp, udp_ptr as *mut UdpHeader, 1);
+    ptr::copy_nonoverlapping(
+        UDP_PAYLOAD.as_ptr(),
+        udp_ptr.add(udp_size),
+        UDP_PAYLOAD.len(),
+    );
+
+    let checksum = ipv4_checksum(udp_ptr, udp_len as usize, 3, &[], src_ip, dst_ip, 17);
+    (*((udp_ptr) as *mut UdpHeader)).set_checksum(checksum);
+
+    (mac_size + ip_size + udp_len as usize) as u32
 }
 
 /// RFC 793 state machine. Returns the reply flags/seq/ack on a transition that

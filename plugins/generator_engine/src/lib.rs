@@ -8,13 +8,14 @@ use crate::exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
 use crate::wabrix::plugins::logging;
 use wabrix_api::connections::ConnectionPool;
 use wabrix_api::engine_common::{handle_control_event, ControlResult};
-use wabrix_api::engine_common::{parse_engine_config, SeparatedString, WasmCell, WasmValue};
-use wabrix_api::mailbox_api::MailboxBatch;
+use wabrix_api::engine_common::{parse_generator_config, SeparatedString, WasmCell, WasmValue};
+use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
 use wabrix_api::{MAX_BATCH_SIZE, TIMER_KIND_TIMEOUT};
 
 use wabrix_api::tcp_common::{
-    write_tcp_reply, EngineConfig, SynGenerator, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE,
-    STAT_COUNT, STAT_DROP, STAT_SENT_SYN, STAT_TICK_DROP, STAT_TO_LINUX,
+    write_tcp_reply, write_udp_packet, GeneratorConfig, GeneratorProtocol, SynGenerator, FLAG_SYN,
+    PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_SENT_SYN, STAT_TICK_DROP,
+    STAT_TO_LINUX,
 };
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -23,7 +24,7 @@ wit_bindgen::generate!({
     world: "engine-plugin",
 });
 
-static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
+static CONFIG: WasmCell<Option<GeneratorConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<wabrix_api::tcp_common::TimeoutStack> =
     WasmCell::new(wabrix_api::tcp_common::TimeoutStack::new());
@@ -77,6 +78,78 @@ pub fn init_logging() {
     log::set_max_level(log::LevelFilter::Info); // Set your desired Wasm log level
 }
 
+#[inline(always)]
+fn prepare_syn_packet(
+    packet: &mut MailboxPacket<'_>,
+    gen: &mut SynGenerator,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: u32,
+    dst_ip: u32,
+) {
+    gen.syns_sent += 1;
+    let src_port = gen.port_counter;
+    gen.prng_state = gen
+        .prng_state
+        .wrapping_mul(1664525)
+        .wrapping_add(1013904223);
+    let isn = gen.prng_state;
+    let packet_src_ip = src_ip.wrapping_add(gen.ip_offset);
+
+    if gen.port_counter == PORT_END_RANGE {
+        gen.port_counter = PORT_START_RANGE;
+        gen.ip_offset = (gen.ip_offset + 1) % 250;
+    } else {
+        gen.port_counter += 1;
+    }
+
+    let data_ptr = packet.data_ptr_mut();
+
+    // SAFETY: The host-owned timer frame has capacity for the generated SYN
+    // packet and grants this plugin exclusive access during process_batch.
+    let packet_len = unsafe {
+        write_tcp_reply(
+            data_ptr,
+            src_mac,
+            dst_mac,
+            packet_src_ip,
+            src_port,
+            dst_ip,
+            80,
+            isn,
+            0,
+            FLAG_SYN,
+        )
+    };
+    packet.resize_payload(packet_len);
+}
+
+#[inline(always)]
+fn prepare_udp_packet(
+    packet: &mut MailboxPacket<'_>,
+    gen: &mut SynGenerator,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src_ip: u32,
+    dst_ip: u32,
+) {
+    gen.syns_sent += 1;
+    let src_port = gen.port_counter;
+    if gen.port_counter == PORT_END_RANGE {
+        gen.port_counter = PORT_START_RANGE;
+    } else {
+        gen.port_counter += 1;
+    }
+
+    let data_ptr = packet.data_ptr_mut();
+
+    // SAFETY: The host-owned timer frame has capacity for the generated UDP
+    // packet and grants this plugin exclusive access during process_batch.
+    let packet_len =
+        unsafe { write_udp_packet(data_ptr, src_mac, dst_mac, src_ip, src_port, dst_ip, 80) };
+    packet.resize_payload(packet_len);
+}
+
 struct GeneratorEngine;
 
 impl Guest for GeneratorEngine {
@@ -88,7 +161,7 @@ impl Guest for GeneratorEngine {
     //   - tsc_frequency: The frequency of the TSC counter, in Hz.
     // - The init_data function should initialize the plugin's state, such as the connection pool
     //   or any other state that needs to be maintained across batches.
-    // - The init_data function should also set the tsc_frequency value in the EngineConfig struct.
+    // - The init_data function also stores the TSC frequency in GeneratorConfig.
     // - The init_data function returns a boolean value indicating whether the initialization was successful.
     // - If the initialization is successful, the plugin will be ready to process batches.
     fn init_data(
@@ -96,7 +169,7 @@ impl Guest for GeneratorEngine {
         tsc_frequency: u64,
     ) -> bool {
         init_logging();
-        let Some((config, _node_name)) = parse_engine_config(data, tsc_frequency) else {
+        let Some((config, _node_name)) = parse_generator_config(data, tsc_frequency) else {
             return false;
         };
         *CONFIG.borrow_mut() = Some(config);
@@ -107,64 +180,73 @@ impl Guest for GeneratorEngine {
     fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
         let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
         let config_guard = CONFIG.borrow();
-        let (syn_rate, syn_limit, src_ip, dst_ip, src_mac, dst_mac, tsc_frequency) = config_guard
-            .as_ref()
-            .map_or((0, None, [0; 4], [0; 4], [0; 6], [0xff; 6], 0), |config| {
+        let (
+            protocol,
+            generation_rate,
+            generation_limit,
+            src_ip,
+            dst_ip,
+            src_mac,
+            dst_mac,
+            tsc_frequency,
+        ) = config_guard.as_ref().map_or(
+            (
+                GeneratorProtocol::Syn,
+                0,
+                None,
+                [0; 4],
+                [0; 4],
+                [0; 6],
+                [0xff; 6],
+                0,
+            ),
+            |config| {
                 (
-                    config.syn_rate.unwrap_or(0),
-                    config.syn_limit,
+                    config.protocol,
+                    config.generation_rate.unwrap_or(0),
+                    config.generation_limit,
                     config.src_ip.unwrap_or([0; 4]),
                     config.dst_ip.unwrap_or([0; 4]),
                     config.src_mac.unwrap_or([0; 6]),
                     config.dst_mac.unwrap_or([0xff; 6]),
                     config.tsc_frequency,
                 )
-            });
+            },
+        );
         let mut stats = TCP_STATS.borrow_mut();
         for mut packet in batch.iter_mut() {
             let action = if let Some(timer_kind) = packet.tick_kind() {
                 let mut a = ROUTE_DROP;
                 let mut generated_reply = false;
 
-                // PRIORITY 2: Generate new SYNs
-                if timer_kind != TIMER_KIND_TIMEOUT && syn_rate > 0 {
+                if timer_kind != TIMER_KIND_TIMEOUT && generation_rate > 0 {
                     let mut gen = SYN_GEN.borrow_mut();
                     let allowed_to_send = gen.activated
-                        && match syn_limit {
+                        && match generation_limit {
                             Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
                             None => true,
                         };
 
                     if allowed_to_send {
                         let packet_start_tsc = CURRENT_TSC.get();
-                        gen.syns_sent += 1;
-                        gen.prng_state = gen
-                            .prng_state
-                            .wrapping_mul(1664525)
-                            .wrapping_add(1013904223);
-                        let isn = gen.prng_state;
-
-                        let src_port = gen.port_counter;
-                        let base_ip = u32::from_be_bytes(src_ip);
-                        let our_ip = base_ip.wrapping_add(gen.ip_offset);
-
-                        if gen.port_counter == PORT_END_RANGE {
-                            gen.port_counter = PORT_START_RANGE;
-                            gen.ip_offset = (gen.ip_offset + 1) % 250;
-                        } else {
-                            gen.port_counter += 1;
-                        }
-
-                        let dst_port = 80;
                         let their_ip = u32::from_be_bytes(dst_ip);
-                        let data_ptr = packet.data_ptr_mut();
-
-                        unsafe {
-                            let packet_len = write_tcp_reply(
-                                data_ptr, src_mac, dst_mac, our_ip, src_port, their_ip, dst_port,
-                                isn, 0, FLAG_SYN,
-                            );
-                            packet.resize_payload(packet_len);
+                        match protocol {
+                            GeneratorProtocol::Syn => prepare_syn_packet(
+                                &mut packet,
+                                &mut gen,
+                                src_mac,
+                                dst_mac,
+                                u32::from_be_bytes(src_ip),
+                                their_ip,
+                            ),
+                            GeneratorProtocol::Udp => prepare_udp_packet(
+                                &mut packet,
+                                &mut gen,
+                                src_mac,
+                                dst_mac,
+                                u32::from_be_bytes(src_ip),
+                                their_ip,
+                            ),
                         }
 
                         let packet_end_tsc = CURRENT_TSC.get();
@@ -172,8 +254,8 @@ impl Guest for GeneratorEngine {
                             GENERATION_START_TSC.set(packet_start_tsc);
                         }
 
-                        let generation_complete =
-                            syn_limit.is_some_and(|limit| limit > 0 && gen.syns_sent == limit);
+                        let generation_complete = generation_limit
+                            .is_some_and(|limit| limit > 0 && gen.syns_sent == limit);
                         if generation_complete {
                             let start_tsc = GENERATION_START_TSC.get();
                             let elapsed_tsc = packet_end_tsc.saturating_sub(start_tsc);
@@ -227,7 +309,7 @@ impl Guest for GeneratorEngine {
         }
 
         // Keep the configuration borrowed for the duration of this read-only
-        // operation. Cloning `EngineConfig` here would clone its optional
+        // operation. Cloning `GeneratorConfig` here would clone its optional
         // node name on every timer callback.
         let config_guard = CONFIG.borrow();
         let Some(config) = config_guard.as_ref() else {
@@ -248,13 +330,13 @@ impl Guest for GeneratorEngine {
         // =================================================================
         // SYN GENERATOR
         // =================================================================
-        let syn_rate = config.syn_rate.unwrap_or(0);
+        let generation_rate = config.generation_rate.unwrap_or(0);
         let mut desired_syn_frames = 0;
-        if syn_rate > 0 {
+        if generation_rate > 0 {
             let mut gen = SYN_GEN.borrow_mut();
 
             let allowed_to_send = gen.activated
-                && match config.syn_limit {
+                && match config.generation_limit {
                     Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
                     None => true,
                 };
@@ -268,10 +350,10 @@ impl Guest for GeneratorEngine {
 
                 gen.cycle_accumulator = gen
                     .cycle_accumulator
-                    .saturating_add((delta_tsc as u128) * (syn_rate as u128));
+                    .saturating_add((delta_tsc as u128) * (generation_rate as u128));
                 let syn_frames = (gen.cycle_accumulator / (tsc_freq as u128)) as u32;
 
-                if let Some(max_syns) = config.syn_limit {
+                if let Some(max_syns) = config.generation_limit {
                     let mut syn_frames = syn_frames;
                     let remaining = max_syns.saturating_sub(gen.syns_sent);
                     if (syn_frames as u64) > remaining {

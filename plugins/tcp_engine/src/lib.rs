@@ -2,10 +2,10 @@
 
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
 use crate::wabrix::plugins::logging;
+use alloc::string::String;
+use alloc::vec::Vec;
 use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
 use wabrix_api::engine_common::{handle_control_event, ControlResult, WasmCell, WasmValue};
 use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
@@ -17,7 +17,7 @@ use wabrix_api::{
 };
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_reply, EngineConfig, SynGenerator, TimeoutStack, FLAG_ACK,
+    run_tcp_state_machine, write_tcp_reply, SynGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
     FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
     STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
     STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
@@ -35,10 +35,10 @@ wit_bindgen::generate!({
 
 /// A zero-cost, single-threaded state container for WASM.
 /// Uses `RefCell` to prevent re-entrancy panics, but uses NO ATOMICS.
- 
+
 /// An even faster container for simple Copy types (like u64).
 /// Uses `Cell`, which doesn't even have a borrow counter. Absolute zero overhead.
-static CONFIG: WasmCell<Option<EngineConfig>> = WasmCell::new(None);
+static CONFIG: WasmCell<Option<TcpEngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<TimeoutStack> = WasmCell::new(TimeoutStack::new());
 static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
@@ -56,7 +56,6 @@ static CURRENT_TSC: WasmValue<u64> = WasmValue::new(0);
 static LAST_TIMEOUT_SCAN: WasmValue<u64> = WasmValue::new(0);
 static RUN_START_TSC: WasmValue<u64> = WasmValue::new(0);
 static LAST_TIMER_LOG_TSC: WasmValue<u64> = WasmValue::new(0);
-
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
@@ -129,8 +128,8 @@ impl Guest for TcpEngine {
         tsc_frequency: u64,
     ) -> bool {
         init_logging();
-        let mut config = EngineConfig {
-            bypass: false,
+        let mut config = TcpEngineConfig {
+            common: Default::default(),
             ..Default::default()
         };
 
@@ -575,7 +574,8 @@ impl Guest for TcpEngine {
 
         if potential_log {
             let last_timer_log_tsc = LAST_TIMER_LOG_TSC.get();
-            if last_timer_log_tsc == 0 || current_tsc.saturating_sub(last_timer_log_tsc) >= 30*tsc_freq
+            if last_timer_log_tsc == 0
+                || current_tsc.saturating_sub(last_timer_log_tsc) >= 30 * tsc_freq
             {
                 LAST_TIMER_LOG_TSC.set(current_tsc);
                 let timestamp_micros = if tsc_freq > 0 {
@@ -798,7 +798,7 @@ fn flush_state(mode: u8) {
 unsafe fn handle_tcp_packet(
     packet: &mut Packet,
     pool: &mut ConnectionPool,
-    config: &EngineConfig,
+    config: &TcpEngineConfig,
 ) -> (u32, u32) {
     let current_tsc = CURRENT_TSC.get();
 

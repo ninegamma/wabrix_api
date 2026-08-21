@@ -8,7 +8,9 @@ use core::cell::{Cell, RefCell};
 use hashbrown::HashMap;
 
 use crate::helpers::{parse_ip, parse_mac, parse_suffixed_number};
-use crate::tcp_common::{EngineConfig, SynGenerator};
+use crate::tcp_common::{
+    CommonEngineConfig, GeneratorConfig, GeneratorProtocol, SynGenerator, TcpEngineConfig,
+};
 use crate::{HotWasmPayload, PluginOpcode, StandardOpcode};
 
 /// No-std equivalent of the formatting helper used by the native tools.
@@ -87,12 +89,102 @@ pub enum ControlResult {
     Invalid,
 }
 
+pub trait EngineConfigModel {
+    fn common_mut(&mut self) -> &mut CommonEngineConfig;
+    fn apply_updates(&mut self, updates: &HashMap<String, String>) -> bool;
+}
+
+fn parse_update_number(updates: &HashMap<String, String>, key: &str) -> Result<Option<Option<u64>>, ()> {
+    match updates.get(key) {
+        Some(value) if value.is_empty() => Ok(Some(None)),
+        Some(value) => parse_suffixed_number(value).map(|number| Some(Some(number))).map_err(|_| ()),
+        None => Ok(None),
+    }
+}
+
+impl EngineConfigModel for TcpEngineConfig {
+    fn common_mut(&mut self) -> &mut CommonEngineConfig {
+        &mut self.common
+    }
+
+    fn apply_updates(&mut self, updates: &HashMap<String, String>) -> bool {
+        let Ok(syn_rate) = parse_update_number(updates, "syn_rate") else {
+            return false;
+        };
+        let Ok(syn_limit) = parse_update_number(updates, "syn_limit") else {
+            return false;
+        };
+        let close_timeout = match updates.get("close_timeout") {
+            Some(value) if value.is_empty() => Some(None),
+            Some(value) => match value.parse::<u64>() {
+                Ok(number) => Some(Some(number)),
+                Err(_) => return false,
+            },
+            None => None,
+        };
+
+        if let Some(value) = syn_rate {
+            self.syn_rate = value;
+        }
+        if let Some(value) = syn_limit {
+            self.syn_limit = value;
+        }
+        if let Some(value) = close_timeout {
+            self.close_timeout_millis = value;
+        }
+        true
+    }
+}
+
+impl EngineConfigModel for GeneratorConfig {
+    fn common_mut(&mut self) -> &mut CommonEngineConfig {
+        &mut self.common
+    }
+
+    fn apply_updates(&mut self, updates: &HashMap<String, String>) -> bool {
+        let rate_key = if updates.contains_key("generation_rate") {
+            "generation_rate"
+        } else {
+            "syn_rate"
+        };
+        let limit_key = if updates.contains_key("generation_limit") {
+            "generation_limit"
+        } else {
+            "syn_limit"
+        };
+        let Ok(rate) = parse_update_number(updates, rate_key) else {
+            return false;
+        };
+        let Ok(limit) = parse_update_number(updates, limit_key) else {
+            return false;
+        };
+        let protocol = match updates.get("prot").or_else(|| updates.get("protocol")) {
+            Some(value) => match GeneratorProtocol::parse(value) {
+                Some(protocol) => Some(protocol),
+                None => return false,
+            },
+            None => None,
+        };
+
+        if let Some(value) = rate {
+            self.generation_rate = value;
+        }
+        if let Some(value) = limit {
+            self.generation_limit = value;
+        }
+        if let Some(protocol) = protocol {
+            self.protocol = protocol;
+        }
+        true
+    }
+}
+
 /// Handle the control protocol shared by all `engine-plugin` implementations.
 /// Plugin adapters remain responsible only for plugin-specific flush work and logging.
-pub fn handle_control_event(
+pub fn handle_control_event<C: EngineConfigModel>(
     raw_opcode: u32,
     payload: &[u8],
-    config: &WasmCell<Option<EngineConfig>>,
+    config: &WasmCell<Option<C>>,
     syn_generator: &WasmCell<SynGenerator>,
 ) -> ControlResult {
     match PluginOpcode::from(raw_opcode) {
@@ -124,9 +216,9 @@ pub fn handle_control_event(
     }
 }
 
-pub fn set_operational_state(
+pub fn set_operational_state<C: EngineConfigModel>(
     state: u8,
-    config: &WasmCell<Option<EngineConfig>>,
+    config: &WasmCell<Option<C>>,
     syn_generator: &WasmCell<SynGenerator>,
 ) {
     let mut generator = syn_generator.borrow_mut();
@@ -136,15 +228,15 @@ pub fn set_operational_state(
         match state {
             0 => {
                 generator.activated = false;
-                config.bypass = false;
+                config.common_mut().bypass = false;
             }
             1 => {
                 generator.activated = true;
-                config.bypass = false;
+                config.common_mut().bypass = false;
             }
             2 => {
                 generator.activated = false;
-                config.bypass = true;
+                config.common_mut().bypass = true;
             }
             _ => {}
         }
@@ -163,62 +255,26 @@ pub fn reset_syn_state(mode: u8, syn_generator: &WasmCell<SynGenerator>) {
     }
 }
 
-fn apply_configuration_update(
+fn apply_configuration_update<C: EngineConfigModel>(
     updates: &HashMap<String, String>,
-    config: &WasmCell<Option<EngineConfig>>,
+    config: &WasmCell<Option<C>>,
 ) -> bool {
-    let syn_rate = match updates.get("syn_rate") {
-        Some(value) if value.is_empty() => Some(None),
-        Some(value) => Some(parse_suffixed_number(value).ok()),
-        None => None,
-    };
-    let syn_limit = match updates.get("syn_limit") {
-        Some(value) if value.is_empty() => Some(None),
-        Some(value) => Some(parse_suffixed_number(value).ok()),
-        None => None,
-    };
-    let close_timeout = match updates.get("close_timeout") {
-        Some(value) if value.is_empty() => Some(None),
-        Some(value) => Some(value.parse::<u64>().ok()),
-        None => None,
-    };
-
-    if updates.contains_key("syn_rate") && syn_rate == Some(None)
-        || updates.contains_key("syn_limit") && syn_limit == Some(None)
-        || updates.contains_key("close_timeout") && close_timeout == Some(None)
-    {
-        return false;
-    }
-
     let mut guard = config.borrow_mut();
     let Some(config) = guard.as_mut() else {
         return false;
     };
-
-    if let Some(value) = syn_rate {
-        config.syn_rate = value;
-    }
-    if let Some(value) = syn_limit {
-        config.syn_limit = value;
-    }
-    if let Some(value) = close_timeout {
-        config.close_timeout_millis = value;
-    }
-    true
+    config.apply_updates(updates)
 }
 
 /// Parse and validate configuration common to engine plugins.
 ///
-/// The returned node name preserves the TCP engine's existing fallback behavior: an explicit
+/// The returned node name uses the shared engine fallback behavior: an explicit
 /// `name` wins, otherwise the original `src_ip` string is used.
-pub fn parse_engine_config(
+pub fn parse_generator_config(
     data: Vec<(String, String)>,
     tsc_frequency: u64,
-) -> Option<(EngineConfig, String)> {
-    let mut config = EngineConfig {
-        bypass: false,
-        ..Default::default()
-    };
+) -> Option<(GeneratorConfig, String)> {
+    let mut config = GeneratorConfig::default();
     let mut raw_src_ip = None;
 
     for (key, value) in data {
@@ -245,17 +301,16 @@ pub fn parse_engine_config(
                 config.rng_seed = value.parse::<u32>().ok();
                 config.rng_seed.as_ref()?;
             }
-            "syn_rate" => {
-                config.syn_rate = parse_suffixed_number(&value).ok();
-                config.syn_rate.as_ref()?;
+            "generation_rate" | "syn_rate" => {
+                config.generation_rate = parse_suffixed_number(&value).ok();
+                config.generation_rate.as_ref()?;
             }
-            "syn_limit" => {
-                config.syn_limit = parse_suffixed_number(&value).ok();
-                config.syn_limit.as_ref()?;
+            "generation_limit" | "syn_limit" => {
+                config.generation_limit = parse_suffixed_number(&value).ok();
+                config.generation_limit.as_ref()?;
             }
-            "close_timeout" => {
-                config.close_timeout_millis = value.parse::<u64>().ok();
-                config.close_timeout_millis.as_ref()?;
+            "protocol" | "prot" => {
+                config.protocol = GeneratorProtocol::parse(&value)?;
             }
             _ => {}
         }
@@ -264,12 +319,12 @@ pub fn parse_engine_config(
     if config.src_ip.is_none()
         || config.src_mac.is_none()
         || config.dst_mac.is_none()
-        || (config.dst_ip.is_none() && config.syn_rate.is_some_and(|rate| rate > 0))
+        || (config.dst_ip.is_none() && config.generation_rate.is_some_and(|rate| rate > 0))
     {
         return None;
     }
 
-    config.tsc_frequency = tsc_frequency;
+    config.common.tsc_frequency = tsc_frequency;
     let node_name = config
         .name
         .clone()
