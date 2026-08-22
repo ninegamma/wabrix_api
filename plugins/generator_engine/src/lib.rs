@@ -13,7 +13,7 @@ use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
 use wabrix_api::{MAX_BATCH_SIZE, TIMER_KIND_TIMEOUT};
 
 use wabrix_api::tcp_common::{
-    write_tcp_reply, write_udp_packet, GeneratorConfig, GeneratorProtocol, SynGenerator, FLAG_SYN,
+    write_tcp_reply, write_udp_packet, GeneratorConfig, GeneratorProtocol, PacketGenerator, FLAG_SYN,
     PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_SENT_SYN, STAT_TICK_DROP,
     STAT_TO_LINUX,
 };
@@ -28,13 +28,13 @@ static CONFIG: WasmCell<Option<GeneratorConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<wabrix_api::tcp_common::TimeoutStack> =
     WasmCell::new(wabrix_api::tcp_common::TimeoutStack::new());
-static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
+static PACKET_GEN: WasmCell<PacketGenerator> = WasmCell::new(PacketGenerator {
     last_tsc: 0,
     cycle_accumulator: 0,
     port_counter: PORT_START_RANGE,
     ip_offset: 0,
     prng_state: 1,
-    syns_sent: 0,
+    packets_sent: 0,
     activated: true,
 });
 
@@ -81,13 +81,13 @@ pub fn init_logging() {
 #[inline(always)]
 fn prepare_syn_packet(
     packet: &mut MailboxPacket<'_>,
-    gen: &mut SynGenerator,
+    gen: &mut PacketGenerator,
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
     src_ip: u32,
     dst_ip: u32,
 ) {
-    gen.syns_sent += 1;
+    gen.packets_sent += 1;
     let src_port = gen.port_counter;
     gen.prng_state = gen
         .prng_state
@@ -127,13 +127,13 @@ fn prepare_syn_packet(
 #[inline(never)]
 fn prepare_udp_packet(
     packet: &mut MailboxPacket<'_>,
-    gen: &mut SynGenerator,
+    gen: &mut PacketGenerator,
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
     src_ip: u32,
     dst_ip: u32,
 ) {
-    gen.syns_sent += 1;
+    gen.packets_sent += 1;
     let src_port = gen.port_counter;
     if gen.port_counter == PORT_END_RANGE {
         gen.port_counter = PORT_START_RANGE;
@@ -176,10 +176,10 @@ fn process_batch_for_protocol<const UDP: bool>(
             let mut generated_reply = false;
 
             if timer_kind != TIMER_KIND_TIMEOUT && config.generation_rate > 0 {
-                let mut gen = SYN_GEN.borrow_mut();
+                let mut gen = PACKET_GEN.borrow_mut();
                 let allowed_to_send = gen.activated
                     && match config.generation_limit {
-                        Some(max_packets) => gen.syns_sent < max_packets || max_packets == 0,
+                        Some(max_packets) => gen.packets_sent < max_packets || max_packets == 0,
                         None => true,
                     };
 
@@ -209,13 +209,13 @@ fn process_batch_for_protocol<const UDP: bool>(
                     }
 
                     let packet_end_tsc = CURRENT_TSC.get();
-                    if gen.syns_sent == 1 {
+                    if gen.packets_sent == 1 {
                         GENERATION_START_TSC.set(packet_start_tsc);
                     }
 
                     let generation_complete = config
                         .generation_limit
-                        .is_some_and(|limit| limit > 0 && gen.syns_sent == limit);
+                        .is_some_and(|limit| limit > 0 && gen.packets_sent == limit);
                     if generation_complete {
                         let start_tsc = GENERATION_START_TSC.get();
                         let elapsed_tsc = packet_end_tsc.saturating_sub(start_tsc);
@@ -224,7 +224,7 @@ fn process_batch_for_protocol<const UDP: bool>(
                         } else {
                             0
                         };
-                        let packets = gen.syns_sent as u128;
+                        let packets = gen.packets_sent as u128;
                         let packets_per_second = if elapsed_micros > 0 {
                             packets * 1_000_000 / elapsed_micros
                         } else {
@@ -335,80 +335,64 @@ impl Guest for GeneratorEngine {
     }
 
     fn process_timers(current_tsc: u64) -> TimerPlan {
-        // Share time with process_batch
+        // Global state updates remain imperative but concise
         CURRENT_TSC.set(current_tsc);
-
         if RUN_START_TSC.get() == 0 {
             RUN_START_TSC.set(current_tsc);
         }
 
-        // Keep the configuration borrowed for the duration of this read-only
-        // operation. Cloning `GeneratorConfig` here would clone its optional
-        // node name on every timer callback.
+        // Pattern match the config to extract only what we need, or return early
         let config_guard = CONFIG.borrow();
-        let Some(config) = config_guard.as_ref() else {
-            return TimerPlan {
-                timeout_frames: 0,
-                syn_frames: 0,
-            };
+        let (tsc_freq, rate, limit) = match config_guard.as_ref() {
+            Some(c) if c.tsc_frequency > 0 && c.generation_rate.unwrap_or(0) > 0 => (
+                c.tsc_frequency as u128,
+                c.generation_rate.unwrap() as u128,
+                c.generation_limit,
+            ),
+            _ => return TimerPlan { timeout_frames: 0, syn_frames: 0 },
         };
-        let tsc_freq = config.tsc_frequency;
 
-        if tsc_freq == 0 {
-            return TimerPlan {
-                timeout_frames: 0,
-                syn_frames: 0,
-            };
-        }
+        // Evaluate the frame generation as a single expression
+        let syn_frames = {
+            let mut gen = PACKET_GEN.borrow_mut();
 
-        // =================================================================
-        // SYN GENERATOR
-        // =================================================================
-        let generation_rate = config.generation_rate.unwrap_or(0);
-        let mut desired_syn_frames = 0;
-        if generation_rate > 0 {
-            let mut gen = SYN_GEN.borrow_mut();
+            // Check if we are stopped by a limit (treating Some(0) as unlimited)
+            let limit_reached = limit.is_some_and(|max| max > 0 && gen.packets_sent >= max);
 
-            let allowed_to_send = gen.activated
-                && match config.generation_limit {
-                    Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
-                    None => true,
+            if !gen.activated || limit_reached {
+                0 // Block evaluates to 0, no frames generated
+            } else {
+                // Calculate time delta
+                let delta_tsc = if gen.last_tsc == 0 {
+                    0
+                } else {
+                    current_tsc.saturating_sub(gen.last_tsc)
                 };
-
-            if allowed_to_send {
-                if gen.last_tsc == 0 {
-                    gen.last_tsc = current_tsc;
-                }
-                let delta_tsc = current_tsc.saturating_sub(gen.last_tsc);
                 gen.last_tsc = current_tsc;
 
-                gen.cycle_accumulator = gen
-                    .cycle_accumulator
-                    .saturating_add((delta_tsc as u128) * (generation_rate as u128));
-                let syn_frames = (gen.cycle_accumulator / (tsc_freq as u128)) as u32;
+                // Accumulate cycles
+                gen.cycle_accumulator = gen.cycle_accumulator.saturating_add((delta_tsc as u128) * rate);
 
-                if let Some(max_syns) = config.generation_limit {
-                    let mut syn_frames = syn_frames;
-                    let remaining = max_syns.saturating_sub(gen.syns_sent);
-                    if (syn_frames as u64) > remaining {
-                        syn_frames = remaining as u32;
-                    }
-                    desired_syn_frames = syn_frames;
-                } else {
-                    desired_syn_frames = syn_frames;
+                // Calculate how many frames the cycles allow
+                let available_frames = (gen.cycle_accumulator / tsc_freq) as u64;
+
+                // Apply generation limits and cap at MAX_BATCH_SIZE
+                let allowed_frames = match limit {
+                    Some(max) if max > 0 => available_frames.min(max.saturating_sub(gen.packets_sent)),
+                    _ => available_frames, // Handles None and Some(0)
+                };
+
+                let final_frames = (allowed_frames as u32).min(MAX_BATCH_SIZE as u32);
+
+                // Deduct consumed cycles immediately
+                if final_frames > 0 {
+                    gen.cycle_accumulator = gen.cycle_accumulator
+                        .saturating_sub((final_frames as u128) * tsc_freq);
                 }
+
+                final_frames
             }
-        }
-
-        let max_batch = MAX_BATCH_SIZE as u32;
-        let syn_frames = desired_syn_frames.min(max_batch);
-
-        if syn_frames > 0 {
-            let mut gen = SYN_GEN.borrow_mut();
-            gen.cycle_accumulator = gen
-                .cycle_accumulator
-                .saturating_sub((syn_frames as u128) * (tsc_freq as u128));
-        }
+        };
 
         TimerPlan {
             timeout_frames: 0,
@@ -419,14 +403,14 @@ impl Guest for GeneratorEngine {
     // Inside the Wasm plugin code
 
     fn on_control_event(raw_opcode: u32, payload: Vec<u8>) -> bool {
-        return match handle_control_event(raw_opcode, &payload, &CONFIG, &SYN_GEN) {
+        match handle_control_event(raw_opcode, &payload, &CONFIG, &PACKET_GEN) {
             ControlResult::Flush(mode) => {
                 flush_state(mode);
                 true
             }
             ControlResult::Handled => true,
             ControlResult::Invalid => false,
-        };
+        }
     }
     fn get_telemetry() -> Vec<u64> {
         let mut stats = TCP_STATS.borrow().to_vec();
@@ -439,7 +423,7 @@ impl Guest for GeneratorEngine {
 }
 
 fn set_state(state: u8) {
-    let mut syn_gen = SYN_GEN.borrow_mut();
+    let mut packet_gen = PACKET_GEN.borrow_mut();
     let mut config_guard = CONFIG.borrow_mut();
 
     // Safely attempt to modify the config only if it exists
@@ -447,18 +431,18 @@ fn set_state(state: u8) {
         match state {
             0 => {
                 // State 0: Offline / Paused
-                syn_gen.activated = false;
+                packet_gen.activated = false;
                 config.bypass = false;
             }
             1 => {
                 // State 1: Online / Active
-                syn_gen.activated = true;
+                packet_gen.activated = true;
                 config.bypass = false;
             }
             2 => {
                 // State 2: Bypass Mode
                 // Disable generation, let all traffic flow transparently
-                syn_gen.activated = false;
+                packet_gen.activated = false;
                 config.bypass = true;
             }
             _ => {
@@ -483,16 +467,16 @@ fn flush_state(mode: u8) {
 
     // Reset the SYN generator tracking
     {
-        let mut syn_gen = SYN_GEN.borrow_mut();
-        syn_gen.syns_sent = 0;
-        syn_gen.cycle_accumulator = 0;
-        syn_gen.last_tsc = 0;
+        let mut packet_gen = PACKET_GEN.borrow_mut();
+        packet_gen.packets_sent = 0;
+        packet_gen.cycle_accumulator = 0;
+        packet_gen.last_tsc = 0;
 
         // Optional: If mode == 1 (Hard Reset), also reset the PRNG and Port Counter
         // to ensure perfectly repeatable PCAP generation across test runs.
         if mode == 1 {
-            syn_gen.port_counter = PORT_START_RANGE;
-            syn_gen.prng_state = 1;
+            packet_gen.port_counter = PORT_START_RANGE;
+            packet_gen.prng_state = 1;
         }
     }
 

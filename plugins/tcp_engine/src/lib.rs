@@ -17,7 +17,7 @@ use wabrix_api::{
 };
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_reply, SynGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
+    run_tcp_state_machine, write_tcp_reply, PacketGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
     FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
     STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
     STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
@@ -41,13 +41,13 @@ wit_bindgen::generate!({
 static CONFIG: WasmCell<Option<TcpEngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<TimeoutStack> = WasmCell::new(TimeoutStack::new());
-static SYN_GEN: WasmCell<SynGenerator> = WasmCell::new(SynGenerator {
+static SYN_GEN: WasmCell<PacketGenerator> = WasmCell::new(PacketGenerator {
     last_tsc: 0,
     cycle_accumulator: 0,
     port_counter: PORT_START_RANGE,
     ip_offset: 0,
     prng_state: 1,
-    syns_sent: 0,
+    packets_sent: 0,
     activated: true,
 });
 
@@ -345,12 +345,12 @@ impl Guest for TcpEngine {
                         let mut gen = SYN_GEN.borrow_mut();
                         let allowed_to_send = gen.activated
                             && match local_config.syn_limit {
-                                Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
+                                Some(max_syns) => gen.packets_sent < max_syns || max_syns == 0,
                                 None => true,
                             };
 
                         if allowed_to_send {
-                            gen.syns_sent += 1;
+                            gen.packets_sent += 1;
                             gen.prng_state = gen
                                 .prng_state
                                 .wrapping_mul(1664525)
@@ -503,7 +503,7 @@ impl Guest for TcpEngine {
 
             let allowed_to_send = gen.activated
                 && match config.syn_limit {
-                    Some(max_syns) => gen.syns_sent < max_syns || max_syns == 0,
+                    Some(max_syns) => gen.packets_sent < max_syns || max_syns == 0,
                     None => true,
                 };
 
@@ -519,7 +519,7 @@ impl Guest for TcpEngine {
                 let mut syn_frames = (gen.cycle_accumulator / (tsc_freq as u128)) as u32;
 
                 if let Some(max_syns) = config.syn_limit {
-                    let remaining = max_syns.saturating_sub(gen.syns_sent);
+                    let remaining = max_syns.saturating_sub(gen.packets_sent);
                     if (syn_frames as u64) > remaining {
                         syn_frames = remaining as u32;
                     }
@@ -529,7 +529,7 @@ impl Guest for TcpEngine {
                 log::trace!(
                     "process_timers: syn_frames= {}, gen.syns_sent= {}, max_syns= {:?}",
                     syn_frames,
-                    gen.syns_sent,
+                    gen.packets_sent,
                     config.syn_limit
                 );
                 // The accumulator is reduced after the fair allocation below
@@ -776,7 +776,7 @@ fn flush_state(mode: u8) {
     // Reset the SYN generator tracking
     {
         let mut syn_gen = SYN_GEN.borrow_mut();
-        syn_gen.syns_sent = 0;
+        syn_gen.packets_sent = 0;
         syn_gen.cycle_accumulator = 0;
         syn_gen.last_tsc = 0;
 

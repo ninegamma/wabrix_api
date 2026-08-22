@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 
 use crate::helpers::{parse_ip, parse_mac, parse_suffixed_number};
 use crate::tcp_common::{
-    CommonEngineConfig, GeneratorConfig, GeneratorProtocol, SynGenerator, TcpEngineConfig,
+    CommonEngineConfig, GeneratorConfig, GeneratorProtocol, PacketGenerator, TcpEngineConfig,
 };
 use crate::{HotWasmPayload, PluginOpcode, StandardOpcode};
 
@@ -185,7 +185,7 @@ pub fn handle_control_event<C: EngineConfigModel>(
     raw_opcode: u32,
     payload: &[u8],
     config: &WasmCell<Option<C>>,
-    syn_generator: &WasmCell<SynGenerator>,
+    syn_generator: &WasmCell<PacketGenerator>,
 ) -> ControlResult {
     match PluginOpcode::from(raw_opcode) {
         PluginOpcode::Standard(StandardOpcode::SetOperationalState) => {
@@ -219,7 +219,7 @@ pub fn handle_control_event<C: EngineConfigModel>(
 pub fn set_operational_state<C: EngineConfigModel>(
     state: u8,
     config: &WasmCell<Option<C>>,
-    syn_generator: &WasmCell<SynGenerator>,
+    syn_generator: &WasmCell<PacketGenerator>,
 ) {
     let mut generator = syn_generator.borrow_mut();
     let mut config = config.borrow_mut();
@@ -243,9 +243,9 @@ pub fn set_operational_state<C: EngineConfigModel>(
     }
 }
 
-pub fn reset_syn_state(mode: u8, syn_generator: &WasmCell<SynGenerator>) {
+pub fn reset_syn_state(mode: u8, syn_generator: &WasmCell<PacketGenerator>) {
     let mut generator = syn_generator.borrow_mut();
-    generator.syns_sent = 0;
+    generator.packets_sent = 0;
     generator.cycle_accumulator = 0;
     generator.last_tsc = 0;
 

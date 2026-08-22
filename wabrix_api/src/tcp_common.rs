@@ -123,17 +123,17 @@ impl DerefMut for GeneratorConfig {
     }
 }
 
-pub struct SynGenerator {
+pub struct PacketGenerator {
     pub last_tsc: u64,
     pub cycle_accumulator: u128,
     pub port_counter: u16,
     pub ip_offset: u32,
     pub prng_state: u32,
-    pub syns_sent: u64,
+    pub packets_sent: u64,
     pub activated: bool,
 }
 
-impl Default for SynGenerator {
+impl Default for PacketGenerator {
     fn default() -> Self {
         Self {
             last_tsc: 0,
@@ -141,7 +141,7 @@ impl Default for SynGenerator {
             port_counter: PORT_START_RANGE,
             ip_offset: 0,
             prng_state: 1,
-            syns_sent: 0,
+            packets_sent: 0,
             activated: false,
         }
     }
