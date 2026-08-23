@@ -13,7 +13,7 @@ use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
 use wabrix_api::{MAX_BATCH_SIZE, TIMER_KIND_TIMEOUT};
 
 use wabrix_api::tcp_common::{
-    write_tcp_reply, write_udp_packet, GeneratorConfig, GeneratorProtocol, PacketGenerator, FLAG_SYN,
+    write_tcp_packet, write_udp_packet, GeneratorConfig, GeneratorProtocol, PacketGenerator, FLAG_SYN,
     PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_SENT_SYN, STAT_TICK_DROP,
     STAT_TO_LINUX,
 };
@@ -80,7 +80,7 @@ pub fn init_logging() {
 
 #[inline(always)]
 fn prepare_syn_packet(
-    packet: &mut MailboxPacket<'_>,
+    mb_packet: &mut MailboxPacket<'_>,
     gen: &mut PacketGenerator,
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
@@ -103,25 +103,20 @@ fn prepare_syn_packet(
         gen.port_counter += 1;
     }
 
-    let data_ptr = packet.data_ptr_mut();
 
-    // SAFETY: The host-owned timer frame has capacity for the generated SYN
-    // packet and grants this plugin exclusive access during process_batch.
-    let packet_len = unsafe {
-        write_tcp_reply(
-            data_ptr,
-            src_mac,
-            dst_mac,
-            packet_src_ip,
-            src_port,
-            dst_ip,
-            80,
-            isn,
-            0,
-            FLAG_SYN,
-        )
-    };
-    packet.resize_payload(packet_len);
+
+    write_tcp_packet(
+        mb_packet.as_packet(),
+        src_mac,
+        dst_mac,
+        packet_src_ip,
+        src_port,
+        dst_ip,
+        80,
+        isn,
+        0,
+        FLAG_SYN,
+    );
 }
 
 #[inline(never)]
@@ -132,6 +127,7 @@ fn prepare_udp_packet(
     dst_mac: [u8; 6],
     src_ip: u32,
     dst_ip: u32,
+    udp_payload: &[u8],
 ) {
     gen.packets_sent += 1;
     let src_port = gen.port_counter;
@@ -141,13 +137,16 @@ fn prepare_udp_packet(
         gen.port_counter += 1;
     }
 
-    let data_ptr = packet.data_ptr_mut();
-
-    // SAFETY: The host-owned timer frame has capacity for the generated UDP
-    // packet and grants this plugin exclusive access during process_batch.
-    let packet_len =
-        unsafe { write_udp_packet(data_ptr, src_mac, dst_mac, src_ip, src_port, dst_ip, 80) };
-    packet.resize_payload(packet_len);
+    write_udp_packet(
+        packet.as_packet(),
+        src_mac,
+        dst_mac,
+        src_ip,
+        src_port,
+        dst_ip,
+        80,
+        udp_payload,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -172,23 +171,42 @@ fn process_batch_for_protocol<const UDP: bool>(
     let mut stats = TCP_STATS.borrow_mut();
 
     for mut packet in batch.iter_mut() {
-        let action = if let Some(timer_kind) = packet.tick_kind() {
-            let mut generated_reply = false;
-
-            if timer_kind != TIMER_KIND_TIMEOUT && config.generation_rate > 0 {
+        let action = match packet.tick_kind() {
+            None => {
+                // Route standard non-timer packets to Linux
+                stats[STAT_TO_LINUX] += 1;
+                ROUTE_LINUX
+            }
+            Some(timer_kind) if timer_kind == TIMER_KIND_TIMEOUT || config.generation_rate == 0 => {
+                // Drop inactive timers or drop when generation is disabled
+                stats[STAT_DROP] += 1;
+                stats[STAT_TICK_DROP] += 1;
+                ROUTE_DROP
+            }
+            Some(_) => {
                 let mut gen = PACKET_GEN.borrow_mut();
-                let allowed_to_send = gen.activated
-                    && match config.generation_limit {
-                        Some(max_packets) => gen.packets_sent < max_packets || max_packets == 0,
-                        None => true,
-                    };
 
-                if allowed_to_send {
+                // Evaluate generation limits idiomatically
+                let under_limit = config
+                    .generation_limit
+                    .map_or(true, |max| gen.packets_sent < max || max == 0);
+
+                if !gen.activated || !under_limit {
+                    stats[STAT_DROP] += 1;
+                    stats[STAT_TICK_DROP] += 1;
+                    ROUTE_DROP
+                } else {
+                    // Generate and track the packet
                     let packet_start_tsc = CURRENT_TSC.get();
                     let src_ip = u32::from_be_bytes(config.src_ip);
                     let dst_ip = u32::from_be_bytes(config.dst_ip);
 
+                    // `packet_start_tsc` originates from the host's actual
+                    // `_rdtsc()` value passed through process_timers().
+                    packet.as_packet().set_timestamp(packet_start_tsc);
+
                     if UDP {
+                        let udp_payload = packet_start_tsc.to_be_bytes();
                         prepare_udp_packet(
                             &mut packet,
                             &mut gen,
@@ -196,6 +214,7 @@ fn process_batch_for_protocol<const UDP: bool>(
                             config.dst_mac,
                             src_ip,
                             dst_ip,
+                            &udp_payload,
                         );
                     } else {
                         prepare_syn_packet(
@@ -208,22 +227,25 @@ fn process_batch_for_protocol<const UDP: bool>(
                         );
                     }
 
-                    let packet_end_tsc = CURRENT_TSC.get();
                     if gen.packets_sent == 1 {
                         GENERATION_START_TSC.set(packet_start_tsc);
                     }
 
+                    let packet_end_tsc = CURRENT_TSC.get();
                     let generation_complete = config
                         .generation_limit
                         .is_some_and(|limit| limit > 0 && gen.packets_sent == limit);
+
                     if generation_complete {
                         let start_tsc = GENERATION_START_TSC.get();
                         let elapsed_tsc = packet_end_tsc.saturating_sub(start_tsc);
+
                         let elapsed_micros = if config.tsc_frequency > 0 {
                             (elapsed_tsc as u128 * 1_000_000) / config.tsc_frequency as u128
                         } else {
                             0
                         };
+
                         let packets = gen.packets_sent as u128;
                         let packets_per_second = if elapsed_micros > 0 {
                             packets * 1_000_000 / elapsed_micros
@@ -240,27 +262,16 @@ fn process_batch_for_protocol<const UDP: bool>(
                     }
 
                     stats[STAT_SENT_SYN] += 1;
-                    generated_reply = true;
+                    ROUTE_TX
                 }
             }
-
-            if !generated_reply {
-                stats[STAT_DROP] += 1;
-                stats[STAT_TICK_DROP] += 1;
-                ROUTE_DROP
-            } else {
-                ROUTE_TX
-            }
-        } else {
-            stats[STAT_TO_LINUX] += 1;
-            ROUTE_LINUX
         };
+
         packet.set_action(action);
     }
 
     batch_size
 }
-
 struct GeneratorEngine;
 
 impl Guest for GeneratorEngine {
@@ -281,6 +292,9 @@ impl Guest for GeneratorEngine {
     ) -> bool {
         init_logging();
         let Some((config, _node_name)) = parse_generator_config(data, tsc_frequency) else {
+            log::error!(
+                "generator engine initialization failed: invalid or incomplete configuration"
+            );
             return false;
         };
         *CONFIG.borrow_mut() = Some(config);
@@ -290,34 +304,27 @@ impl Guest for GeneratorEngine {
 
     fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
         let config_guard = CONFIG.borrow();
-        let (protocol, config) = config_guard.as_ref().map_or(
-            (
-                GeneratorProtocol::Syn,
-                GeneratorBatchConfig {
-                    generation_rate: 0,
-                    generation_limit: None,
-                    src_ip: [0; 4],
-                    dst_ip: [0; 4],
-                    src_mac: [0; 6],
-                    dst_mac: [0xff; 6],
-                    tsc_frequency: 0,
-                },
-            ),
-            |config| {
-                (
-                    config.protocol,
-                    GeneratorBatchConfig {
-                        generation_rate: config.generation_rate.unwrap_or(0),
-                        generation_limit: config.generation_limit,
-                        src_ip: config.src_ip.unwrap_or([0; 4]),
-                        dst_ip: config.dst_ip.unwrap_or([0; 4]),
-                        src_mac: config.src_mac.unwrap_or([0; 6]),
-                        dst_mac: config.dst_mac.unwrap_or([0xff; 6]),
-                        tsc_frequency: config.tsc_frequency,
-                    },
-                )
-            },
-        );
+        let Some(config) = config_guard.as_ref() else {
+            // init_data is required to succeed before process_batch is called.
+            // Fail closed if the host violates that lifecycle contract.
+            drop(config_guard);
+            let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+            for mut packet in batch.iter_mut() {
+                packet.set_action(ROUTE_DROP);
+            }
+            return batch_size;
+        };
+
+        let protocol = config.protocol;
+        let config = GeneratorBatchConfig {
+            generation_rate: config.generation_rate.unwrap_or(0),
+            generation_limit: config.generation_limit,
+            src_ip: config.src_ip.unwrap_or([0; 4]),
+            dst_ip: config.dst_ip.unwrap_or([0; 4]),
+            src_mac: config.src_mac.unwrap_or([0; 6]),
+            dst_mac: config.dst_mac.unwrap_or([0xff; 6]),
+            tsc_frequency: config.tsc_frequency,
+        };
         match protocol {
             GeneratorProtocol::Syn => process_batch_for_protocol::<false>(
                 batch_size,

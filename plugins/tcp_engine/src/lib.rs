@@ -17,10 +17,10 @@ use wabrix_api::{
 };
 
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_reply, PacketGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK,
-    FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP,
-    STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK,
-    STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
+    run_tcp_state_machine, write_tcp_packet, PacketGenerator, TcpEngineConfig, TimeoutStack,
+    FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT,
+    STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN,
+    STAT_SENT_SYNACK, STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
 };
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -288,7 +288,6 @@ impl Guest for TcpEngine {
                         };
 
                     if exists {
-                        let data_ptr = packet.data_ptr_mut();
                         let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                         let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
@@ -297,40 +296,36 @@ impl Guest for TcpEngine {
                                 conn.state = TcpState::FinWait1;
                                 conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
                             }
-                            unsafe {
-                                l = write_tcp_reply(
-                                    data_ptr,
-                                    reply_src_mac,
-                                    reply_dst_mac,
-                                    flow_key.2,
-                                    flow_key.3,
-                                    flow_key.0,
-                                    flow_key.1,
-                                    snd_nxt,
-                                    rcv_nxt,
-                                    FLAG_FIN | FLAG_ACK,
-                                );
-                            }
+                            l = write_tcp_packet(
+                                packet.as_packet(),
+                                reply_src_mac,
+                                reply_dst_mac,
+                                flow_key.2,
+                                flow_key.3,
+                                flow_key.0,
+                                flow_key.1,
+                                snd_nxt,
+                                rcv_nxt,
+                                FLAG_FIN | FLAG_ACK,
+                            );
                             inc_stat!(STAT_SENT_FIN);
                             a = ROUTE_TX;
                             generated_reply = true;
                         } else {
                             pool.remove(&flow_key);
                             inc_stat!(STAT_SENT_RST);
-                            unsafe {
-                                l = write_tcp_reply(
-                                    data_ptr,
-                                    reply_src_mac,
-                                    reply_dst_mac,
-                                    flow_key.2,
-                                    flow_key.3,
-                                    flow_key.0,
-                                    flow_key.1,
-                                    snd_nxt,
-                                    rcv_nxt,
-                                    FLAG_RST | FLAG_ACK,
-                                );
-                            }
+                            l = write_tcp_packet(
+                                packet.as_packet(),
+                                reply_src_mac,
+                                reply_dst_mac,
+                                flow_key.2,
+                                flow_key.3,
+                                flow_key.0,
+                                flow_key.1,
+                                snd_nxt,
+                                rcv_nxt,
+                                FLAG_RST | FLAG_ACK,
+                            );
                             a = ROUTE_TX;
                             generated_reply = true;
                         }
@@ -381,24 +376,21 @@ impl Guest for TcpEngine {
                                 CURRENT_TSC.get(),
                             );
 
-                            let data_ptr = packet.data_ptr_mut();
                             let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
                             let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
 
-                            unsafe {
-                                l = write_tcp_reply(
-                                    data_ptr,
-                                    reply_src_mac,
-                                    reply_dst_mac,
-                                    our_ip,
-                                    src_port,
-                                    their_ip,
-                                    dst_port,
-                                    isn,
-                                    0,
-                                    FLAG_SYN,
-                                );
-                            }
+                            l = write_tcp_packet(
+                                packet.as_packet(),
+                                reply_src_mac,
+                                reply_dst_mac,
+                                our_ip,
+                                src_port,
+                                their_ip,
+                                dst_port,
+                                isn,
+                                0,
+                                FLAG_SYN,
+                            );
                             inc_stat!(STAT_SENT_SYN);
                             a = ROUTE_TX;
                             generated_reply = true;
@@ -903,12 +895,11 @@ unsafe fn handle_tcp_packet(
     }
 
     if let Some((reply_flags, reply_seq, reply_ack)) = action_opt {
-        let data_ptr = packet.data_ptr_mut();
         let reply_dst_mac = incoming_src_mac;
         let reply_src_mac = config.src_mac.unwrap_or(incoming_dst_mac);
 
-        let len = write_tcp_reply(
-            data_ptr,
+        let len = write_tcp_packet(
+            packet,
             reply_src_mac,
             reply_dst_mac,
             dst_ip,

@@ -693,9 +693,28 @@ impl WPdu {
 
 #[repr(C, align(64))]
 pub struct Pdu0 {
-    /// [0..56] 56 Bytes: The pure Wasm-compatible core!
+    /// Wasm-facing packet handle used in the batch ABI.
+    ///
+    /// `Pdu0` is the representation placed in the Wasm linear-memory batch. The
+    /// first 56 bytes are the portable [`WPdu`] packet state: packet data
+    /// location and length, parsed-header information, frame identity, and
+    /// routing metadata. Wasm code accesses that state through `Deref` and
+    /// `DerefMut` without knowing anything about the native host runtime.
+    ///
+    /// The host owns the underlying UMEM frame and is responsible for returning
+    /// it to the appropriate frame registry. A plugin must therefore return a
+    /// `Pdu0` through the batch/host protocol rather than allowing it to be
+    /// dropped locally.
+    ///
+    /// `Pdu0` deliberately has the same 64-byte C layout as the host-side `Pdu`:
+    /// a 56-byte [`WPdu`] followed by an opaque 8-byte host-only field. Keep the
+    /// field order, size, and alignment stable because the host and Wasm sides
+    /// exchange arrays of these values directly.
+    ///
     pub w: WPdu,
-    /// Do not touch! This is the Host's SystemBus pointer.
+    /// Opaque host-only state. The native host stores its `SystemBus` pointer
+    /// here; Wasm must never read or modify it. Keeping it outside [`WPdu`]
+    /// preserves a pointer-free, portable 56-byte packet core for Wasm.
     _do_not_touch_padding: u64,
 }
 
@@ -725,7 +744,7 @@ impl Drop for Pdu0 {
         );
     }
 }
-
+/*
 impl Pdu0 {
     #[inline]
     pub fn slice_from_bytes(bytes: &mut [u8]) -> &mut [Self] {
@@ -791,5 +810,5 @@ impl Pdu0 {
         (mac_len + ip_len + tcp_len) as u32
     }
 }
-
+*/
 const _: () = assert!(size_of::<Pdu0>() == 64);

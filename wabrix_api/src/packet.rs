@@ -42,7 +42,8 @@ impl<'a> Packet<'a> {
             )
         }
     }
-
+    
+    #[inline]
     pub fn headroom(&self) -> usize {
         self.pdu.headroom()
     }
@@ -53,12 +54,14 @@ impl<'a> Packet<'a> {
     }
 
     /// Pushes a new header. Returns Result to allow graceful error handling.
+    #[inline]
     pub fn push_header<T: Copy>(&mut self, header: &T) -> anyhow::Result<&mut Self> {
         self.pdu.push_header(self.umem_base, header)?;
         Ok(self)
     }
 
     /// Truncates or expands the packet payload
+    #[inline]
     pub fn resize_payload(&mut self, new_len: u32) -> &mut Self {
         self.pdu.set_data_length(new_len);
         self
@@ -91,6 +94,18 @@ impl<'a> Packet<'a> {
     #[inline(always)]
     pub fn data_len(&self) -> u32 {
         self.pdu.data_len()
+    }
+
+    /// Returns the host-provided timestamp associated with this packet.
+    #[inline(always)]
+    pub fn timestamp(&self) -> u64 {
+        self.pdu.timestamp
+    }
+
+    /// Associates a host-provided timestamp with this packet.
+    #[inline(always)]
+    pub fn set_timestamp(&mut self, timestamp: u64) {
+        self.pdu.timestamp = timestamp;
     }
 
     /// Provides a mutable pointer to the raw payload for zero-copy rewriting
@@ -347,6 +362,142 @@ impl<'a> Packet<'a> {
         }
 
         (mac_len + ip_len + tcp_len) as u32
+    }
+    /// Writes a MAC header to the start of the frame and updates the header stack.
+    #[inline(always)]
+    pub fn write_mac_header(&mut self, mac: &MacHeader) -> u32 {
+        let mac_len = core::mem::size_of::<MacHeader>();
+        let ptr = self.data_ptr_mut();
+
+        // SAFETY: The frame size is pre-allocated and guaranteed to be larger than the MAC header.
+        // `mac` is a valid reference on the caller's stack targeting a disjoint UMEM region.
+        unsafe {
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
+        }
+
+        self.resize_payload(mac_len as u32);
+
+        let hr = self.headroom() as u16;
+        let stack = &mut self.pdu.header_stack;
+
+        stack.kinds[0] = HeaderKind::Mac;
+        stack.offsets[0] = hr;
+
+        stack.hc = 1;
+
+        mac_len as u32
+    }
+
+    /// Writes MAC and IPv4 headers sequentially into the frame and updates the header stack.
+    #[inline(always)]
+    pub fn write_mac_ipv4_headers(&mut self, mac: &MacHeader, ip: &IpHeader) -> u32 {
+        let mac_len = core::mem::size_of::<MacHeader>();
+        let ip_len = core::mem::size_of::<IpHeader>();
+
+        let ptr = self.data_ptr_mut();
+
+        // SAFETY: Writes originate from stack-allocated structs and target disjoint UMEM regions.
+        // The frame capacity is guaranteed to hold the combined headers.
+        unsafe {
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
+            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut IpHeader, 1);
+        }
+
+        let total_len = (mac_len + ip_len) as u32;
+        self.resize_payload(total_len);
+
+        let hr = self.headroom() as u16;
+        let stack = &mut self.pdu.header_stack;
+
+        stack.kinds[0] = HeaderKind::Mac;
+        stack.offsets[0] = hr;
+
+        stack.kinds[1] = HeaderKind::Ip;
+        stack.offsets[1] = hr + mac_len as u16;
+
+        stack.hc = 2;
+
+        total_len
+    }
+    #[inline(always)]
+    pub fn write_mac_ipv4_tcp_headers(
+        &mut self,
+        mac: &MacHeader,
+        ip: &IpHeader,
+        tcp: &TcpHeader,
+    ) -> u32 {
+        let mac_len = core::mem::size_of::<MacHeader>();
+        let ip_len = core::mem::size_of::<IpHeader>();
+        let tcp_len = core::mem::size_of::<TcpHeader>();
+
+        let ptr = self.data_ptr_mut();
+
+        // SAFETY: Writes originate from stack-allocated structs and target disjoint UMEM regions.
+        // The frame capacity is guaranteed to hold the combined headers.
+        unsafe {
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
+            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut IpHeader, 1);
+            core::ptr::copy_nonoverlapping(tcp, ptr.add(mac_len + ip_len) as *mut TcpHeader, 1);
+        }
+
+        let total_len = (mac_len + ip_len + tcp_len) as u32;
+        self.resize_payload(total_len);
+
+        let hr = self.headroom() as u16;
+        let stack = &mut self.pdu.header_stack;
+
+        stack.kinds[0] = HeaderKind::Mac;
+        stack.offsets[0] = hr;
+
+        stack.kinds[1] = HeaderKind::Ip;
+        stack.offsets[1] = hr + mac_len as u16;
+
+        stack.kinds[2] = HeaderKind::Tcp;
+        stack.offsets[2] = hr + (mac_len + ip_len) as u16;
+
+        stack.hc = 3;
+
+        total_len
+    }
+
+    #[inline(always)]
+    pub fn write_mac_ipv4_udp_headers(
+        &mut self,
+        mac: &MacHeader,
+        ip: &IpHeader,
+        udp: &UdpHeader,
+    ) -> u32 {
+        let mac_len = core::mem::size_of::<MacHeader>();
+        let ip_len = core::mem::size_of::<IpHeader>();
+        let udp_len = core::mem::size_of::<UdpHeader>();
+
+        let ptr = self.data_ptr_mut();
+
+        // SAFETY: Operations write sequentially into the exclusively owned UMEM frame.
+        unsafe {
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
+            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut IpHeader, 1);
+            core::ptr::copy_nonoverlapping(udp, ptr.add(mac_len + ip_len) as *mut UdpHeader, 1);
+        }
+
+        let total_len = (mac_len + ip_len + udp_len) as u32;
+        self.resize_payload(total_len);
+
+        let hr = self.headroom() as u16;
+        let stack = &mut self.pdu.header_stack;
+
+        stack.kinds[0] = HeaderKind::Mac;
+        stack.offsets[0] = hr;
+
+        stack.kinds[1] = HeaderKind::Ip;
+        stack.offsets[1] = hr + mac_len as u16;
+
+        stack.kinds[2] = HeaderKind::Udp;
+        stack.offsets[2] = hr + (mac_len + ip_len) as u16;
+
+        stack.hc = 3;
+
+        total_len
     }
 }
 
