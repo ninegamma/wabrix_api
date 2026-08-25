@@ -8,6 +8,10 @@ license.workspace = true
 # This is crucial for Wasm components
 crate-type = ["cdylib"]
 
+[features]
+default = []
+runtime-diagnostics = []
+
 [dependencies]
 # Pull this from your workspace.dependencies
 wit-bindgen = { workspace = true }

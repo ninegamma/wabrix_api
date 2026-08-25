@@ -36,6 +36,25 @@ cargo build --target wasm32-wasip2 --release
 
 The resulting `.wasm` file will be located at `target/wasm32-wasip2/release/my_wabrix_plugin.wasm` and is ready to be loaded via your Wabrix TOML configuration.
 
+### Generator Runtime Diagnostics
+
+The example `generator_engine` plugin provides an optional
+`runtime-diagnostics` feature for investigating timer-based rate control. It
+adds completion-time counters for `process_timers()` calls, credited timer
+cycles, requested frames, timer timestamps, the final cycle accumulator, and
+available/final-frame histograms. The feature is disabled by default to keep
+the normal plugin build free of diagnostic counter updates.
+
+Build it with:
+
+```bash
+cargo build -p generator_engine --target wasm32-wasip2 --release \
+  --features runtime-diagnostics
+```
+
+Host-side final timer summaries are controlled separately by the Wabrix engine’s
+`runtime-diagnostics` feature.
+
 ## 🛠 Architecture
 
 Wabrix plugins operate as nodes within a unified processing graph. By utilizing this API, your compiled `.wasm` modules can natively receive parsed network packets and events, interact with the engine's control plane via opcodes, and dispatch packets to subsequent routing nodes.
