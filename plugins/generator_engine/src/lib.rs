@@ -13,9 +13,9 @@ use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
 use wabrix_api::{MAX_BATCH_SIZE, TIMER_KIND_TIMEOUT};
 
 use wabrix_api::tcp_common::{
-    write_tcp_packet, write_udp_packet, GeneratorConfig, GeneratorProtocol, PacketGenerator, FLAG_SYN,
-    PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_SENT_SYN, STAT_TICK_DROP,
-    STAT_TO_LINUX,
+    write_tcp_packet, write_udp_packet, GeneratorConfig, GeneratorProtocol, PacketGenerator,
+    FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_SENT_SYN,
+    STAT_TICK_DROP, STAT_TO_LINUX,
 };
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -41,6 +41,7 @@ static PACKET_GEN: WasmCell<PacketGenerator> = WasmCell::new(PacketGenerator {
 static CURRENT_TSC: WasmValue<u64> = WasmValue::new(0);
 static RUN_START_TSC: WasmValue<u64> = WasmValue::new(0);
 static GENERATION_START_TSC: WasmValue<u64> = WasmValue::new(0);
+static CONFIGURED_BATCH_SIZE: WasmValue<u32> = WasmValue::new(MAX_BATCH_SIZE as u32);
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
@@ -102,8 +103,6 @@ fn prepare_syn_packet(
     } else {
         gen.port_counter += 1;
     }
-
-
 
     write_tcp_packet(
         mb_packet.as_packet(),
@@ -291,6 +290,20 @@ impl Guest for GeneratorEngine {
         tsc_frequency: u64,
     ) -> bool {
         init_logging();
+
+        let batch_size = data
+            .iter()
+            .find(|(key, _)| key == "batch_size")
+            .and_then(|(_, value)| value.parse::<u32>().ok())
+            .unwrap_or(MAX_BATCH_SIZE as u32);
+        if batch_size == 0 || batch_size > MAX_BATCH_SIZE as u32 {
+            log::error!(
+                "generator engine initialization failed: batch_size must be between 1 and {}",
+                MAX_BATCH_SIZE
+            );
+            return false;
+        }
+
         let Some((config, _node_name)) = parse_generator_config(data, tsc_frequency) else {
             log::error!(
                 "generator engine initialization failed: invalid or incomplete configuration"
@@ -298,11 +311,17 @@ impl Guest for GeneratorEngine {
             return false;
         };
         *CONFIG.borrow_mut() = Some(config);
+        CONFIGURED_BATCH_SIZE.set(batch_size);
 
         true
     }
 
     fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
+        // Keep the timer plan aligned with the exact batch size supplied by the host.
+        if batch_size > 0 && batch_size <= MAX_BATCH_SIZE as u32 {
+            CONFIGURED_BATCH_SIZE.set(batch_size);
+        }
+
         let config_guard = CONFIG.borrow();
         let Some(config) = config_guard.as_ref() else {
             // init_data is required to succeed before process_batch is called.
@@ -356,11 +375,16 @@ impl Guest for GeneratorEngine {
                 c.generation_rate.unwrap() as u128,
                 c.generation_limit,
             ),
-            _ => return TimerPlan { timeout_frames: 0, syn_frames: 0 },
+            _ => {
+                return TimerPlan {
+                    timeout_frames: 0,
+                    packet_frames: 0,
+                }
+            }
         };
 
         // Evaluate the frame generation as a single expression
-        let syn_frames = {
+        let packet_frames = {
             let mut gen = PACKET_GEN.borrow_mut();
 
             // Check if we are stopped by a limit (treating Some(0) as unlimited)
@@ -378,22 +402,27 @@ impl Guest for GeneratorEngine {
                 gen.last_tsc = current_tsc;
 
                 // Accumulate cycles
-                gen.cycle_accumulator = gen.cycle_accumulator.saturating_add((delta_tsc as u128) * rate);
+                gen.cycle_accumulator = gen
+                    .cycle_accumulator
+                    .saturating_add((delta_tsc as u128) * rate);
 
                 // Calculate how many frames the cycles allow
                 let available_frames = (gen.cycle_accumulator / tsc_freq) as u64;
 
-                // Apply generation limits and cap at MAX_BATCH_SIZE
+                // Apply generation limits and cap at the configured node batch size.
                 let allowed_frames = match limit {
-                    Some(max) if max > 0 => available_frames.min(max.saturating_sub(gen.packets_sent)),
+                    Some(max) if max > 0 => {
+                        available_frames.min(max.saturating_sub(gen.packets_sent))
+                    }
                     _ => available_frames, // Handles None and Some(0)
                 };
 
-                let final_frames = (allowed_frames as u32).min(MAX_BATCH_SIZE as u32);
+                let final_frames = (allowed_frames as u32).min(CONFIGURED_BATCH_SIZE.get());
 
                 // Deduct consumed cycles immediately
                 if final_frames > 0 {
-                    gen.cycle_accumulator = gen.cycle_accumulator
+                    gen.cycle_accumulator = gen
+                        .cycle_accumulator
                         .saturating_sub((final_frames as u128) * tsc_freq);
                 }
 
@@ -403,7 +432,7 @@ impl Guest for GeneratorEngine {
 
         TimerPlan {
             timeout_frames: 0,
-            syn_frames,
+            packet_frames,
         }
     }
 

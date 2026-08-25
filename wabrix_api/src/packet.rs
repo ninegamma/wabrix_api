@@ -42,7 +42,7 @@ impl<'a> Packet<'a> {
             )
         }
     }
-    
+
     #[inline]
     pub fn headroom(&self) -> usize {
         self.pdu.headroom()

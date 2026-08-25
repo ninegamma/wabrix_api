@@ -6,8 +6,8 @@ use macaddr::MacAddr6;
 use network_types::eth::EtherType;
 
 use crate::connections::{ConnectionNode, FlowKey, TcpState};
-use crate::headers::{IpHeader, MacHeader, TcpHeader, UdpHeader};
 use crate::headers::check::ipv4_checksum;
+use crate::headers::{IpHeader, MacHeader, TcpHeader, UdpHeader};
 use crate::helpers::update_tcp_checksum;
 use crate::packet::Packet;
 
@@ -256,7 +256,6 @@ pub fn write_tcp_packet(
     update_tcp_checksum(&mut tcp, 20, src_ip, dst_ip);
 
     packet.write_mac_ipv4_tcp_headers(&mac, &ip, &tcp)
-
 }
 
 /// Formats an Ethernet/IPv4/UDP packet with the supplied payload.

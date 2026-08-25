@@ -94,10 +94,15 @@ pub trait EngineConfigModel {
     fn apply_updates(&mut self, updates: &HashMap<String, String>) -> bool;
 }
 
-fn parse_update_number(updates: &HashMap<String, String>, key: &str) -> Result<Option<Option<u64>>, ()> {
+fn parse_update_number(
+    updates: &HashMap<String, String>,
+    key: &str,
+) -> Result<Option<Option<u64>>, ()> {
     match updates.get(key) {
         Some(value) if value.is_empty() => Ok(Some(None)),
-        Some(value) => parse_suffixed_number(value).map(|number| Some(Some(number))).map_err(|_| ()),
+        Some(value) => parse_suffixed_number(value)
+            .map(|number| Some(Some(number)))
+            .map_err(|_| ()),
         None => Ok(None),
     }
 }

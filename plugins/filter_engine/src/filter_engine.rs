@@ -160,7 +160,7 @@ impl Guest for FilterEngine {
     fn process_timers(_current_tsc: u64) -> TimerPlan {
         TimerPlan {
             timeout_frames: 0,
-            syn_frames: 0,
+            packet_frames: 0,
         }
     }
 

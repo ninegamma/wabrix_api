@@ -40,15 +40,50 @@ impl<T> WasmCell<T> {
 #[derive(Default)]
 struct InspectorConfig {
     bypass: bool,
+    tsc_frequency: u64,
     packets_inspected: u64,
     bytes_inspected: u64,
+    unexpected: u64,
+    delay_samples: u64,
+    mean_delay_us: f64,
+    delay_m2: f64,
 }
 
 static CONFIG: WasmCell<InspectorConfig> = WasmCell::new(InspectorConfig {
     bypass: false,
+    tsc_frequency: 0,
     packets_inspected: 0,
     bytes_inspected: 0,
+    unexpected: 0,
+    delay_samples: 0,
+    mean_delay_us: 0.0,
+    delay_m2: 0.0,
 });
+
+fn packet_delay_us(receive_tsc: u64, send_tsc: u64, tsc_frequency: u64) -> Option<u64> {
+    if tsc_frequency == 0 || receive_tsc < send_tsc {
+        return None;
+    }
+
+    let elapsed_cycles = receive_tsc - send_tsc;
+    Some(((elapsed_cycles as u128 * 1_000_000) / tsc_frequency as u128) as u64)
+}
+
+fn square_root(value: f64) -> f64 {
+    if value <= 0.0 {
+        return 0.0;
+    }
+
+    let mut estimate = if value < 1.0 { 1.0 } else { value };
+    for _ in 0..64 {
+        let next = 0.5 * (estimate + value / estimate);
+        if next == estimate {
+            break;
+        }
+        estimate = next;
+    }
+    estimate
+}
 
 struct HostLogger;
 
@@ -76,9 +111,12 @@ fn init_logging() {
 struct InspectorEngine;
 
 impl Guest for InspectorEngine {
-    fn init_data(_data: Vec<(String, String)>, _tsc_frequency: u64) -> bool {
+    fn init_data(_data: Vec<(String, String)>, tsc_frequency: u64) -> bool {
         init_logging();
-        *CONFIG.borrow_mut() = InspectorConfig::default();
+        *CONFIG.borrow_mut() = InspectorConfig {
+            tsc_frequency,
+            ..InspectorConfig::default()
+        };
         log::info!("InspectorEngine initialized");
         true
     }
@@ -98,8 +136,33 @@ impl Guest for InspectorEngine {
                 config.packets_inspected += 1;
                 config.bytes_inspected += packet.data_len() as u64;
 
-                // Add protocol/content inspection here. Set ROUTE_DROP when
-                // the packet should be discarded; otherwise forward it.
+                let send_tsc = if packet.udp_header().is_some() {
+                    packet.payload().and_then(|payload| {
+                        payload
+                            .get(..core::mem::size_of::<u64>())
+                            .and_then(|bytes| bytes.try_into().ok())
+                            .map(u64::from_be_bytes)
+                    })
+                } else {
+                    None
+                };
+
+                match send_tsc.and_then(|send_tsc| {
+                    packet_delay_us(packet.timestamp(), send_tsc, config.tsc_frequency)
+                }) {
+                    Some(delay_us) => {
+                        // Welford's online algorithm avoids storing samples and
+                        // remains numerically stable for long-running pipelines.
+                        config.delay_samples += 1;
+                        let delay = delay_us as f64;
+                        let delta = delay - config.mean_delay_us;
+                        config.mean_delay_us += delta / config.delay_samples as f64;
+                        let delta_after_mean = delay - config.mean_delay_us;
+                        config.delay_m2 += delta * delta_after_mean;
+                    }
+                    None => config.unexpected += 1,
+                }
+
                 packet.set_action(ROUTE_TX);
             } else {
                 packet.set_action(ROUTE_TX);
@@ -114,7 +177,7 @@ impl Guest for InspectorEngine {
     fn process_timers(_current_tsc: u64) -> TimerPlan {
         TimerPlan {
             timeout_frames: 0,
-            syn_frames: 0,
+            packet_frames: 0,
         }
     }
 
@@ -140,7 +203,21 @@ impl Guest for InspectorEngine {
 
     fn get_telemetry() -> Vec<u64> {
         let config = CONFIG.borrow();
-        alloc::vec![config.packets_inspected, config.bytes_inspected]
+        let variance = if config.delay_samples == 0 {
+            0.0
+        } else {
+            config.delay_m2 / config.delay_samples as f64
+        };
+        let average_delay_us = (config.mean_delay_us + 0.5) as u64;
+        let standard_deviation_us = (square_root(variance) + 0.5) as u64;
+
+        alloc::vec![
+            config.packets_inspected,
+            config.bytes_inspected,
+            config.unexpected,
+            average_delay_us,
+            standard_deviation_us,
+        ]
     }
 }
 

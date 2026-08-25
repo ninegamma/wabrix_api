@@ -440,7 +440,7 @@ impl Guest for TcpEngine {
         let Some(config) = config_guard.as_ref() else {
             return TimerPlan {
                 timeout_frames: 0,
-                syn_frames: 0,
+                packet_frames: 0,
             };
         };
         let tsc_freq = config.tsc_frequency;
@@ -448,7 +448,7 @@ impl Guest for TcpEngine {
         if tsc_freq == 0 {
             return TimerPlan {
                 timeout_frames: 0,
-                syn_frames: 0,
+                packet_frames: 0,
             };
         }
 
@@ -533,7 +533,7 @@ impl Guest for TcpEngine {
         let desired_timeout_frames = pending_timeout_frames.min(max_batch);
         let desired_syn_frames = desired_syn_frames.min(max_batch);
 
-        let (timeout_frames, syn_frames) =
+        let (timeout_frames, packet_frames) =
             if desired_timeout_frames.saturating_add(desired_syn_frames) <= max_batch {
                 (desired_timeout_frames, desired_syn_frames)
             } else {
@@ -555,14 +555,14 @@ impl Guest for TcpEngine {
             let mut gen = SYN_GEN.borrow_mut();
             gen.cycle_accumulator = gen
                 .cycle_accumulator
-                .saturating_sub((syn_frames as u128) * (tsc_freq as u128));
+                .saturating_sub((packet_frames as u128) * (tsc_freq as u128));
             syn_accumulator = gen.cycle_accumulator;
         }
 
-        let frames_to_request = timeout_frames + syn_frames;
+        let frames_to_request = timeout_frames + packet_frames;
         let potential_log = syn_rate > 0
             && ((pending_timeout_frames > (20 * MAX_BATCH_SIZE) as u32)
-                || (syn_frames >= desired_syn_frames));
+                || (packet_frames >= desired_syn_frames));
 
         if potential_log {
             let last_timer_log_tsc = LAST_TIMER_LOG_TSC.get();
@@ -584,7 +584,7 @@ impl Guest for TcpEngine {
                     timestamp_ms,
                     timestamp_ms_fraction,
                     delta_ms,
-                    syn_frames,
+                    packet_frames,
                     desired_syn_frames,
                     syn_accumulator,
                     timeout_frames,
@@ -596,7 +596,7 @@ impl Guest for TcpEngine {
 
         TimerPlan {
             timeout_frames,
-            syn_frames,
+            packet_frames,
         }
     }
 
