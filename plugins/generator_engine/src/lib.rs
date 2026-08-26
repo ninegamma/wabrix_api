@@ -71,6 +71,7 @@ static TIMER_FINAL_FRAMES_HISTOGRAM: WasmCell<[u64; 3]> = WasmCell::new([0; 3]);
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
+const TIMESTAMP_MAGIC: [u8; 4] = *b"WABR";
 
 // The zero-cost global counter array
 static TCP_STATS: WasmCell<[u64; STAT_COUNT]> = WasmCell::new([0; STAT_COUNT]);
@@ -230,7 +231,13 @@ fn process_batch_for_protocol<const UDP: bool>(
                     packet.as_packet().set_timestamp(packet_start_tsc);
 
                     if UDP {
-                        let udp_payload = packet_start_tsc.to_be_bytes();
+                        // Prefix the timestamp so the inspector can reject
+                        // unrelated UDP payloads without per-packet allocation.
+                        let mut udp_payload =
+                            [0u8; TIMESTAMP_MAGIC.len() + core::mem::size_of::<u64>()];
+                        udp_payload[..TIMESTAMP_MAGIC.len()].copy_from_slice(&TIMESTAMP_MAGIC);
+                        udp_payload[TIMESTAMP_MAGIC.len()..]
+                            .copy_from_slice(&packet_start_tsc.to_be_bytes());
                         prepare_udp_packet(
                             &mut packet,
                             &mut gen,

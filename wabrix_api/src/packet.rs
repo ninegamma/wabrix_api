@@ -91,10 +91,6 @@ impl<'a> Packet<'a> {
         self.pdu.timer_kind()
     }
 
-    #[inline(always)]
-    pub fn data_len(&self) -> u32 {
-        self.pdu.data_len()
-    }
 
     /// Returns the host-provided timestamp associated with this packet.
     #[inline(always)]
@@ -107,6 +103,13 @@ impl<'a> Packet<'a> {
     pub fn set_timestamp(&mut self, timestamp: u64) {
         self.pdu.timestamp = timestamp;
     }
+
+    #[inline(always)]
+    pub fn data_len(&self) -> u32 {
+        self.pdu.data_len()
+    }
+
+
 
     /// Provides a mutable pointer to the raw payload for zero-copy rewriting
     #[inline(always)]

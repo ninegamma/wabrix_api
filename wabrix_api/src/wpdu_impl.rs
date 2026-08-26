@@ -199,6 +199,18 @@ impl WPdu {
         }
     }
 
+    /// Returns the host-provided timestamp associated with this packet.
+    #[inline(always)]
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    /// Associates a host-provided timestamp with this packet.
+    #[inline(always)]
+    pub fn set_timestamp(&mut self, timestamp: u64) {
+        self.timestamp = timestamp;
+    }
+
     #[inline]
     pub fn replace_header(&mut self, umem_addr: usize, which: usize, hdr: &Header) {
         // SAFETY: `pdu_header` is reconstructed from `HeaderStack` offsets that were set during

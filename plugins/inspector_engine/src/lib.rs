@@ -18,6 +18,7 @@ wit_bindgen::generate!({
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_DROP: u32 = 2;
+const TIMESTAMP_MAGIC: [u8; 4] = *b"WABR";
 
 struct WasmCell<T>(RefCell<T>);
 
@@ -138,9 +139,12 @@ impl Guest for InspectorEngine {
 
                 let send_tsc = if packet.udp_header().is_some() {
                     packet.payload().and_then(|payload| {
-                        payload
-                            .get(..core::mem::size_of::<u64>())
-                            .and_then(|bytes| bytes.try_into().ok())
+                        let timestamp_start = TIMESTAMP_MAGIC.len();
+                        let timestamp_end = timestamp_start + core::mem::size_of::<u64>();
+                        let bytes = payload.get(..timestamp_end)?;
+                        (bytes[..timestamp_start] == TIMESTAMP_MAGIC)
+                            .then(|| bytes[timestamp_start..timestamp_end].try_into().ok())
+                            .flatten()
                             .map(u64::from_be_bytes)
                     })
                 } else {
