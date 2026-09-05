@@ -262,6 +262,27 @@ impl ConnectionPool {
         }
     }
 
+    /// Gets a connection and refreshes its idle timestamp/list position only
+    /// after the caller-supplied interval has elapsed.
+    pub fn get_mut_and_touch_if_elapsed(
+        &mut self,
+        key: &FlowKey,
+        current_tsc: u64,
+        touch_interval_cycles: u64,
+    ) -> Option<&mut ConnectionNode> {
+        let index = *self.map.get(key)?;
+        let should_touch =
+            current_tsc.saturating_sub(self.arena[index].last_active_tsc) > touch_interval_cycles;
+
+        if should_touch {
+            self.unlink(index);
+            self.push_tail(index);
+            self.arena[index].last_active_tsc = current_tsc;
+        }
+
+        Some(&mut self.arena[index])
+    }
+
     /// O(log N) Completely remove a connection
     pub fn remove(&mut self, key: &FlowKey) {
         if let Some(index) = self.map.remove(key) {

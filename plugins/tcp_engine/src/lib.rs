@@ -57,9 +57,20 @@ static LAST_TIMEOUT_SCAN: WasmValue<u64> = WasmValue::new(0);
 static RUN_START_TSC: WasmValue<u64> = WasmValue::new(0);
 static LAST_TIMER_LOG_TSC: WasmValue<u64> = WasmValue::new(0);
 
+const TIMEOUT_SCAN_INTERVAL_MILLIS: u64 = 10;
+const TIMEOUT_SCAN_INTERVAL_DIVISOR: u64 = 1_000 / TIMEOUT_SCAN_INTERVAL_MILLIS;
+
+const MAX_CONNECTIONS: usize = 524_288;
+//const MAX_CONNECTIONS: usize = 1_048_576;
+
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
+
+#[inline]
+fn timeout_scan_interval_cycles(tsc_frequency: u64) -> u64 {
+    tsc_frequency / TIMEOUT_SCAN_INTERVAL_DIVISOR
+}
 
 // The zero-cost global counter array
 static TCP_STATS: WasmCell<[u64; STAT_COUNT]> = WasmCell::new([0; STAT_COUNT]);
@@ -100,8 +111,6 @@ pub fn init_logging() {
     log::set_max_level(log::LevelFilter::Info); // Set your desired Wasm log level
 }
 
-const MAX_CONNECTIONS: usize = 524_288;
-//const MAX_CONNECTIONS: usize = 1_048_576;
 
 fn init_state_machine(tcp_node_name: String) {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
@@ -213,6 +222,7 @@ impl Guest for TcpEngine {
         init_state_machine(node_name);
 
         config.tsc_frequency = tsc_frequency;
+        config.refresh_timeout_cycles();
         *CONFIG.borrow_mut() = Some(config);
 
         true
@@ -266,6 +276,16 @@ impl Guest for TcpEngine {
             }
             return processed_count;
         };
+        let touch_interval_cycles = timeout_scan_interval_cycles(local_config.tsc_frequency);
+
+        // Hoist pre-parsed MAC addresses outside the packet iteration loop
+        let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
+        let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
+
+        // Pre-calculate integer IP representations once per batch
+        let base_src_ip = u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
+        let base_dst_ip = u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
+        let syn_rate = local_config.syn_rate.unwrap_or(0);
 
         for mut packet in batch.iter_mut() {
             let tick_kind = packet.tick_kind();
@@ -300,9 +320,6 @@ impl Guest for TcpEngine {
                         };
 
                     if exists {
-                        let reply_src_mac = local_config.src_mac.unwrap_or([0; 6]);
-                        let reply_dst_mac = local_config.dst_mac.unwrap_or([0xff; 6]);
-
                         if state == TcpState::Established || state == TcpState::SynReceived {
                             if let Some(conn) = pool.get_mut(&flow_key) {
                                 conn.state = TcpState::FinWait1;
@@ -347,7 +364,6 @@ impl Guest for TcpEngine {
                 // PRIORITY 2: Generate new SYNs
                 if !generated_reply && timer_kind != TIMER_KIND_TIMEOUT {
                     log::trace!("process_batch: generating new SYN");
-                    let syn_rate = local_config.syn_rate.unwrap_or(0);
                     if syn_rate > 0 {
                         let mut gen = SYN_GEN.borrow_mut();
                         let allowed_to_send = gen.activated
@@ -365,9 +381,7 @@ impl Guest for TcpEngine {
                             let isn = gen.prng_state;
 
                             let src_port = gen.port_counter;
-                            let base_ip =
-                                u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
-                            let our_ip = base_ip.wrapping_add(gen.ip_offset);
+                            let our_ip = base_src_ip.wrapping_add(gen.ip_offset);
 
                             if gen.port_counter == PORT_END_RANGE {
                                 gen.port_counter = PORT_START_RANGE;
@@ -377,9 +391,7 @@ impl Guest for TcpEngine {
                             }
 
                             let dst_port = 80;
-                            let their_ip =
-                                u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
-                            let flow_key = FlowKey(their_ip, dst_port, our_ip, src_port);
+                            let flow_key = FlowKey(base_dst_ip, dst_port, our_ip, src_port);
                             pool.insert(
                                 flow_key,
                                 TcpState::SynSent,
@@ -397,7 +409,7 @@ impl Guest for TcpEngine {
                                 reply_dst_mac,
                                 our_ip,
                                 src_port,
-                                their_ip,
+                                base_dst_ip,
                                 dst_port,
                                 isn,
                                 0,
@@ -418,10 +430,9 @@ impl Guest for TcpEngine {
                 }
                 (a, l)
             } else {
-                //packet.parse_fast();  // is already done within the DAG by FastParser Node
                 if packet.fingerprint() == Packet::TCP_OVER_IPV4 {
                     let p = packet.as_packet();
-                    unsafe { handle_tcp_packet(p, pool, local_config) }
+                    unsafe { handle_tcp_packet(p, pool, local_config, touch_interval_cycles) }
                 } else {
                     inc_stat!(STAT_TO_LINUX);
                     (ROUTE_LINUX, packet.data_len())
@@ -467,12 +478,11 @@ impl Guest for TcpEngine {
         // =================================================================
         // 1. TIMEOUT SCAVENGER
         // =================================================================
-        if let Some(timeout_millis) = config.close_timeout_millis {
-            let timeout_cycles = ((timeout_millis as u128 * tsc_freq as u128) / 1000) as u64;
+        if let Some(timeout_cycles) = config.timeout_cycles {
             let last_scan = LAST_TIMEOUT_SCAN.get();
 
             // Run the table scan only once every 10ms to save CPU
-            if current_tsc.saturating_sub(last_scan) > (tsc_freq / 100) {
+            if current_tsc.saturating_sub(last_scan) > timeout_scan_interval_cycles(tsc_freq) {
                 LAST_TIMEOUT_SCAN.set(current_tsc);
                 let mut pool_guard = CONNECTIONS.borrow_mut();
                 let mut queue = TIMEOUT_QUEUE.borrow_mut();
@@ -519,8 +529,10 @@ impl Guest for TcpEngine {
                 gen.last_tsc = current_tsc;
                 syn_delta_tsc = delta_tsc;
 
-                gen.cycle_accumulator += (delta_tsc as u128) * (syn_rate as u128);
-                let mut syn_frames = (gen.cycle_accumulator / (tsc_freq as u128)) as u32;
+                gen.cycle_accumulator = gen
+                    .cycle_accumulator
+                    .saturating_add(delta_tsc.saturating_mul(syn_rate));
+                let mut syn_frames = (gen.cycle_accumulator / tsc_freq) as u32;
 
                 if let Some(max_syns) = config.syn_limit {
                     let remaining = max_syns.saturating_sub(gen.packets_sent);
@@ -567,7 +579,7 @@ impl Guest for TcpEngine {
             let mut gen = SYN_GEN.borrow_mut();
             gen.cycle_accumulator = gen
                 .cycle_accumulator
-                .saturating_sub((packet_frames as u128) * (tsc_freq as u128));
+                .saturating_sub((packet_frames as u64).saturating_mul(tsc_freq));
             syn_accumulator = gen.cycle_accumulator;
         }
 
@@ -583,8 +595,10 @@ impl Guest for TcpEngine {
             {
                 LAST_TIMER_LOG_TSC.set(current_tsc);
                 let timestamp_micros = if tsc_freq > 0 {
-                    (current_tsc.saturating_sub(RUN_START_TSC.get()) as u128 * 1_000_000)
-                        / tsc_freq as u128
+                    current_tsc
+                        .saturating_sub(RUN_START_TSC.get())
+                        .saturating_mul(1_000_000)
+                        / tsc_freq
                 } else {
                     0
                 };
@@ -708,6 +722,7 @@ impl Guest for TcpEngine {
                         if let Some(new_val) = parsed_close_timeout {
                             if config.close_timeout_millis != new_val {
                                 config.close_timeout_millis = new_val;
+                                config.refresh_timeout_cycles();
                                 log::info!("UpdateConfiguration: close_timeout updated");
                             }
                         }
@@ -803,6 +818,7 @@ unsafe fn handle_tcp_packet(
     packet: &mut Packet,
     pool: &mut ConnectionPool,
     config: &TcpEngineConfig,
+    touch_interval_cycles: u64,
 ) -> (u32, u32) {
     let current_tsc = CURRENT_TSC.get();
 
@@ -845,7 +861,9 @@ unsafe fn handle_tcp_packet(
     let action_opt;
     let mut current_state = None;
 
-    if let Some(conn) = pool.get_mut_and_touch(&flow_key, current_tsc) {
+    if let Some(conn) =
+        pool.get_mut_and_touch_if_elapsed(&flow_key, current_tsc, touch_interval_cycles)
+    {
         // Scope the borrow so it drops immediately after the state machine runs
         let mut stats_guard = TCP_STATS.borrow_mut();
         action_opt = run_tcp_state_machine(

@@ -85,6 +85,16 @@ pub struct TcpEngineConfig {
     pub syn_rate: Option<u64>,
     pub syn_limit: Option<u64>,
     pub close_timeout_millis: Option<u64>,
+    /// Timeout converted to TSC cycles during configuration, not on the timer hot path.
+    pub timeout_cycles: Option<u64>,
+}
+
+impl TcpEngineConfig {
+    pub fn refresh_timeout_cycles(&mut self) {
+        self.timeout_cycles = self.close_timeout_millis.map(|timeout_millis| {
+            ((timeout_millis as u128 * self.tsc_frequency as u128) / 1_000) as u64
+        });
+    }
 }
 
 impl Deref for TcpEngineConfig {
@@ -125,7 +135,7 @@ impl DerefMut for GeneratorConfig {
 
 pub struct PacketGenerator {
     pub last_tsc: u64,
-    pub cycle_accumulator: u128,
+    pub cycle_accumulator: u64,
     pub port_counter: u16,
     pub ip_offset: u32,
     pub prng_state: u32,

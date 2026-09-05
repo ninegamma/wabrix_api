@@ -45,7 +45,7 @@ static CONFIGURED_BATCH_SIZE: WasmValue<u32> = WasmValue::new(MAX_BATCH_SIZE as 
 #[cfg(feature = "runtime-diagnostics")]
 static PROCESS_TIMERS_CALLS: WasmValue<u64> = WasmValue::new(0);
 #[cfg(feature = "runtime-diagnostics")]
-static TIMER_CYCLES_CREDITED: WasmValue<u128> = WasmValue::new(0);
+static TIMER_CYCLES_CREDITED: WasmValue<u64> = WasmValue::new(0);
 #[cfg(feature = "runtime-diagnostics")]
 static TIMER_FRAMES_REQUESTED: WasmValue<u64> = WasmValue::new(0);
 #[cfg(feature = "runtime-diagnostics")]
@@ -427,8 +427,8 @@ impl Guest for GeneratorEngine {
         let config_guard = CONFIG.borrow();
         let (tsc_freq, rate, limit) = match config_guard.as_ref() {
             Some(c) if c.tsc_frequency > 0 && c.generation_rate.unwrap_or(0) > 0 => (
-                c.tsc_frequency as u128,
-                c.generation_rate.unwrap() as u128,
+                c.tsc_frequency,
+                c.generation_rate.unwrap(),
                 c.generation_limit,
             ),
             _ => {
@@ -460,12 +460,12 @@ impl Guest for GeneratorEngine {
                 // Accumulate cycles
                 gen.cycle_accumulator = gen
                     .cycle_accumulator
-                    .saturating_add((delta_tsc as u128) * rate);
+                    .saturating_add(delta_tsc.saturating_mul(rate));
                 #[cfg(feature = "runtime-diagnostics")]
                 TIMER_CYCLES_CREDITED.set(
                     TIMER_CYCLES_CREDITED
                         .get()
-                        .saturating_add((delta_tsc as u128) * rate),
+                        .saturating_add(delta_tsc.saturating_mul(rate)),
                 );
 
                 // Calculate how many frames the cycles allow
@@ -538,7 +538,7 @@ impl Guest for GeneratorEngine {
                 if final_frames > 0 {
                     gen.cycle_accumulator = gen
                         .cycle_accumulator
-                        .saturating_sub((final_frames as u128) * tsc_freq);
+                        .saturating_sub((final_frames as u64).saturating_mul(tsc_freq));
                     #[cfg(feature = "runtime-diagnostics")]
                     TIMER_FRAMES_REQUESTED.set(
                         TIMER_FRAMES_REQUESTED

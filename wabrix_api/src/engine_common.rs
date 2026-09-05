@@ -136,6 +136,7 @@ impl EngineConfigModel for TcpEngineConfig {
         }
         if let Some(value) = close_timeout {
             self.close_timeout_millis = value;
+            self.refresh_timeout_cycles();
         }
         true
     }
