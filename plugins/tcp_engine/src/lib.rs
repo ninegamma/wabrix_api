@@ -225,7 +225,19 @@ impl Guest for TcpEngine {
             partition_offset
         );
         let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
-        let local_config = CONFIG.borrow().clone().unwrap_or_default();
+
+        // - Keep the configuration borrowed for the duration of the batch
+        // - Prevents heap allocation of the node name string on the hot path
+        let config_guard = CONFIG.borrow();
+        let Some(local_config) = config_guard.as_ref() else {
+            log::error!("process_batch: missing configuration");
+            for mut packet in batch.iter_mut() {
+                packet.set_action(ROUTE_DROP);
+            }
+            return batch_size;
+        };
+
+        //let local_config = CONFIG.borrow().clone().unwrap_or_default();
         let mut processed_count = 0;
 
         // Fast-Path Bypass
@@ -409,7 +421,7 @@ impl Guest for TcpEngine {
                 //packet.parse_fast();  // is already done within the DAG by FastParser Node
                 if packet.fingerprint() == Packet::TCP_OVER_IPV4 {
                     let p = packet.as_packet();
-                    unsafe { handle_tcp_packet(p, pool, &local_config) }
+                    unsafe { handle_tcp_packet(p, pool, local_config) }
                 } else {
                     inc_stat!(STAT_TO_LINUX);
                     (ROUTE_LINUX, packet.data_len())
