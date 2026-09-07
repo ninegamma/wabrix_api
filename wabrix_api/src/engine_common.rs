@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -11,7 +12,7 @@ use crate::helpers::{parse_ip, parse_mac, parse_suffixed_number};
 use crate::tcp_common::{
     CommonEngineConfig, GeneratorConfig, GeneratorProtocol, PacketGenerator, TcpEngineConfig,
 };
-use crate::{HotWasmPayload, PluginOpcode, StandardOpcode};
+use crate::{HotWasmPayload, OperationalState, PluginOpcode, StandardOpcode};
 
 /// No-std equivalent of the formatting helper used by the native tools.
 pub trait SeparatedString {
@@ -94,6 +95,102 @@ pub trait EngineConfigModel {
     fn apply_updates(&mut self, updates: &HashMap<String, String>) -> bool;
 }
 
+/// Parse and validate the configuration shared by native and Wasm TCP engines.
+///
+/// The returned name uses the common fallback behavior: an explicit `name`
+/// wins, otherwise the original `src_ip` string is used.
+pub fn parse_tcp_engine_config(
+    data: Vec<(String, String)>,
+    tsc_frequency: u64,
+) -> Result<(TcpEngineConfig, String), String> {
+    let mut config = TcpEngineConfig {
+        common: CommonEngineConfig {
+            tsc_frequency,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut raw_src_ip: Option<String> = None;
+
+    for (key, value) in data {
+        match key.as_str() {
+            "name" => config.name = Some(value),
+            "src_mac" => {
+                config.src_mac = parse_mac(&value);
+                if config.src_mac.is_none() {
+                    return Err(format!("invalid src_mac: {}", value));
+                }
+            }
+            "dst_mac" => {
+                config.dst_mac = parse_mac(&value);
+                if config.dst_mac.is_none() {
+                    return Err(format!("invalid dst_mac: {}", value));
+                }
+            }
+            "src_ip" => {
+                raw_src_ip = Some(value.clone());
+                config.src_ip = parse_ip(&value);
+                if config.src_ip.is_none() {
+                    return Err(format!("invalid src_ip: {}", value));
+                }
+            }
+            "dst_ip" => {
+                config.dst_ip = parse_ip(&value);
+                if config.dst_ip.is_none() {
+                    return Err(format!("invalid dst_ip: {}", value));
+                }
+            }
+            "rng_seed" => {
+                config.rng_seed = value.parse::<u32>().ok();
+                if config.rng_seed.is_none() {
+                    return Err(format!("invalid rng_seed: {}", value));
+                }
+            }
+            "syn_rate" => {
+                config.syn_rate = parse_suffixed_number(&value).ok();
+                if config.syn_rate.is_none() {
+                    return Err(format!("invalid syn_rate: {}", value));
+                }
+            }
+            "syn_limit" => {
+                config.syn_limit = parse_suffixed_number(&value).ok();
+                if config.syn_limit.is_none() {
+                    return Err(format!("invalid syn_limit: {}", value));
+                }
+            }
+            "close_timeout" => {
+                config.close_timeout_millis = value.parse::<u64>().ok();
+                if config.close_timeout_millis.is_none() {
+                    return Err(format!("invalid close_timeout: {}", value));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if config.src_ip.is_none() {
+        return Err(String::from("missing required src_ip"));
+    }
+    if config.src_mac.is_none() {
+        return Err(String::from("missing required src_mac"));
+    }
+    if config.dst_mac.is_none() {
+        return Err(String::from("missing required dst_mac"));
+    }
+    if config.syn_rate.is_some_and(|rate| rate > 0) && config.dst_ip.is_none() {
+        return Err(String::from("dst_ip is required when syn_rate is positive"));
+    }
+
+    config.refresh_timeout_cycles();
+    let node_name = config
+        .name
+        .clone()
+        .or(raw_src_ip)
+        .unwrap_or_else(|| String::from("unknown"));
+
+    Ok((config, node_name))
+}
+
 fn parse_update_number(
     updates: &HashMap<String, String>,
     key: &str,
@@ -140,6 +237,24 @@ impl EngineConfigModel for TcpEngineConfig {
         }
         true
     }
+}
+
+/// Decode and atomically apply a serialized TCP hot-configuration update.
+///
+/// The candidate configuration is updated first. The live configuration is
+/// replaced only after every requested value has been validated successfully.
+pub fn apply_tcp_configuration_update(
+    payload: &[u8],
+    config: &mut TcpEngineConfig,
+) -> Result<(), String> {
+    let data = postcard::from_bytes::<HotWasmPayload>(payload)
+        .map_err(|error| format!("invalid TCP configuration payload: {}", error))?;
+    let mut candidate = config.clone();
+    if !candidate.apply_updates(&data.updates) {
+        return Err(String::from("invalid TCP configuration update"));
+    }
+    *config = candidate;
+    Ok(())
 }
 
 impl EngineConfigModel for GeneratorConfig {
@@ -198,10 +313,16 @@ pub fn handle_control_event<C: EngineConfigModel>(
             if payload.len() != 1 {
                 return ControlResult::Invalid;
             }
+            if OperationalState::from_payload(payload[0]).is_none() {
+                return ControlResult::Invalid;
+            }
             set_operational_state(payload[0], config, syn_generator);
             ControlResult::Handled
         }
         PluginOpcode::Standard(StandardOpcode::FlushState) => {
+            if payload.len() > 1 {
+                return ControlResult::Invalid;
+            }
             let mode = if payload.len() == 1 { payload[0] } else { 0 };
             set_operational_state(0, config, syn_generator);
             reset_syn_state(mode, syn_generator);
@@ -231,20 +352,20 @@ pub fn set_operational_state<C: EngineConfigModel>(
     let mut config = config.borrow_mut();
 
     if let Some(config) = config.as_mut() {
-        match state {
-            0 => {
+        match OperationalState::from_payload(state) {
+            Some(OperationalState::Offline) => {
                 generator.activated = false;
                 config.common_mut().bypass = false;
             }
-            1 => {
+            Some(OperationalState::Online) => {
                 generator.activated = true;
                 config.common_mut().bypass = false;
             }
-            2 => {
+            Some(OperationalState::Bypass) => {
                 generator.activated = false;
                 config.common_mut().bypass = true;
             }
-            _ => {}
+            None => {}
         }
     }
 }
@@ -338,4 +459,175 @@ pub fn parse_generator_config(
         .unwrap_or_else(|| String::from("unknown"));
 
     Some((config, node_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_tcp_configuration_update, handle_control_event, parse_tcp_engine_config,
+        set_operational_state, ControlResult, WasmCell,
+    };
+    use crate::tcp_common::{PacketGenerator, TcpEngineConfig, PORT_START_RANGE};
+    use crate::HotWasmPayload;
+    use crate::StandardOpcode;
+    use alloc::vec;
+
+    fn valid_client_data() -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)> {
+        vec![
+            ("name".into(), "client".into()),
+            ("src_mac".into(), "00:11:22:33:44:55".into()),
+            ("dst_mac".into(), "66:77:88:99:aa:bb".into()),
+            ("src_ip".into(), "10.0.0.1".into()),
+            ("dst_ip".into(), "10.0.0.2".into()),
+            ("syn_rate".into(), "1.5k".into()),
+            ("syn_limit".into(), "10k".into()),
+            ("close_timeout".into(), "80".into()),
+        ]
+    }
+
+    #[test]
+    fn parses_shared_tcp_configuration() {
+        let (config, name) = parse_tcp_engine_config(valid_client_data(), 3_000)
+            .expect("valid TCP configuration should parse");
+
+        assert_eq!(name, "client");
+        assert_eq!(config.syn_rate, Some(1_500));
+        assert_eq!(config.syn_limit, Some(10_000));
+        assert_eq!(config.close_timeout_millis, Some(80));
+        assert_eq!(config.timeout_cycles, Some(240));
+    }
+
+    #[test]
+    fn rejects_invalid_values_and_missing_required_fields() {
+        let mut invalid = valid_client_data();
+        invalid.push(("syn_rate".into(), "not-a-rate".into()));
+        assert!(parse_tcp_engine_config(invalid, 3_000).is_err());
+
+        let server = vec![
+            ("src_mac".into(), "00:11:22:33:44:55".into()),
+            ("dst_mac".into(), "66:77:88:99:aa:bb".into()),
+            ("src_ip".into(), "10.0.0.2".into()),
+        ];
+        assert!(parse_tcp_engine_config(server, 3_000).is_ok());
+
+        let missing_source = vec![("dst_mac".into(), "66:77:88:99:aa:bb".into())];
+        assert!(parse_tcp_engine_config(missing_source, 3_000).is_err());
+    }
+
+    #[test]
+    fn applies_tcp_hot_updates_atomically() {
+        let (mut config, _) = parse_tcp_engine_config(valid_client_data(), 3_000)
+            .expect("valid TCP configuration should parse");
+        let payload = postcard::to_allocvec(&HotWasmPayload {
+            updates: [
+                ("syn_rate".into(), "2M".into()),
+                ("close_timeout".into(), "120".into()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .expect("payload should serialize");
+
+        apply_tcp_configuration_update(&payload, &mut config).expect("valid update should apply");
+        assert_eq!(config.syn_rate, Some(2_000_000));
+        assert_eq!(config.close_timeout_millis, Some(120));
+        assert_eq!(config.timeout_cycles, Some(360));
+
+        let invalid_payload = postcard::to_allocvec(&HotWasmPayload {
+            updates: [
+                ("syn_rate".into(), "3M".into()),
+                ("close_timeout".into(), "invalid".into()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .expect("payload should serialize");
+
+        assert!(apply_tcp_configuration_update(&invalid_payload, &mut config).is_err());
+        assert_eq!(config.syn_rate, Some(2_000_000));
+        assert_eq!(config.close_timeout_millis, Some(120));
+    }
+
+    fn lifecycle_state() -> (WasmCell<Option<TcpEngineConfig>>, WasmCell<PacketGenerator>) {
+        (
+            WasmCell::new(Some(TcpEngineConfig::default())),
+            WasmCell::new(PacketGenerator {
+                last_tsc: 100,
+                cycle_accumulator: 200,
+                port_counter: PORT_START_RANGE + 10,
+                ip_offset: 3,
+                prng_state: 42,
+                packets_sent: 7,
+                activated: true,
+            }),
+        )
+    }
+
+    #[test]
+    fn lifecycle_states_have_shared_meanings() {
+        let (config, generator) = lifecycle_state();
+
+        set_operational_state(0, &config, &generator);
+        assert!(!generator.borrow().activated);
+        assert!(!config.borrow().as_ref().unwrap().bypass);
+
+        set_operational_state(1, &config, &generator);
+        assert!(generator.borrow().activated);
+        assert!(!config.borrow().as_ref().unwrap().bypass);
+
+        set_operational_state(2, &config, &generator);
+        assert!(!generator.borrow().activated);
+        assert!(config.borrow().as_ref().unwrap().bypass);
+    }
+
+    #[test]
+    fn lifecycle_control_rejects_unknown_state() {
+        let (config, generator) = lifecycle_state();
+        let result = handle_control_event(
+            StandardOpcode::SetOperationalState as u32,
+            &[3],
+            &config,
+            &generator,
+        );
+
+        assert!(matches!(result, ControlResult::Invalid));
+        assert!(generator.borrow().activated);
+        assert!(!config.borrow().as_ref().unwrap().bypass);
+    }
+
+    #[test]
+    fn flush_modes_share_generator_reset_semantics() {
+        let (config, generator) = lifecycle_state();
+
+        let result =
+            handle_control_event(StandardOpcode::FlushState as u32, &[], &config, &generator);
+        assert!(matches!(result, ControlResult::Flush(0)));
+        assert_eq!(generator.borrow().packets_sent, 0);
+        assert_eq!(generator.borrow().cycle_accumulator, 0);
+        assert_eq!(generator.borrow().last_tsc, 0);
+        assert_eq!(generator.borrow().port_counter, PORT_START_RANGE + 10);
+
+        {
+            let mut generator = generator.borrow_mut();
+            generator.port_counter = PORT_START_RANGE + 20;
+            generator.prng_state = 99;
+        }
+        let result =
+            handle_control_event(StandardOpcode::FlushState as u32, &[1], &config, &generator);
+        assert!(matches!(result, ControlResult::Flush(1)));
+        assert_eq!(generator.borrow().port_counter, PORT_START_RANGE);
+        assert_eq!(generator.borrow().prng_state, 1);
+        assert!(!generator.borrow().activated);
+        assert!(!config.borrow().as_ref().unwrap().bypass);
+
+        assert!(matches!(
+            handle_control_event(
+                StandardOpcode::FlushState as u32,
+                &[0, 1],
+                &config,
+                &generator,
+            ),
+            ControlResult::Invalid
+        ));
+    }
 }

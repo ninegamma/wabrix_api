@@ -1,4 +1,5 @@
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
@@ -46,6 +47,122 @@ pub const STAT_TICK_DROP: usize = 19;
 pub const STAT_TO_LINUX: usize = 20;
 pub const STAT_DROP: usize = 21;
 pub const STAT_COUNT: usize = 22;
+pub const TCP_WATERMARK_INDEX: usize = STAT_COUNT;
+pub const TCP_TELEMETRY_LEN: usize = STAT_COUNT + 1;
+
+/// Stable route meanings used by native and Wasm TCP engines.
+pub const TCP_ROUTE_TX: u32 = 0;
+pub const TCP_ROUTE_LINUX: u32 = 1;
+pub const TCP_ROUTE_DROP: u32 = 2;
+
+/// Stable counter order for `get-telemetry()` and native telemetry mirrors.
+pub const TCP_STAT_NAMES: [&str; STAT_COUNT] = [
+    "sent_syn",
+    "sent_synack",
+    "sent_synack2",
+    "sent_fin",
+    "sent_fin_pssv",
+    "sent_ack4fin",
+    "sent_ack",
+    "sent_rst",
+    "recv_syn",
+    "recv_synack",
+    "recv_synack2",
+    "recv_fin",
+    "recv_fin_pssv",
+    "recv_ack4fin",
+    "recv_ack",
+    "recv_rst",
+    "unexpected",
+    "recv_payload",
+    "sent_payload",
+    "tick_drop",
+    "to_linux",
+    "drop",
+];
+
+/// Builds the shared telemetry vector: all packet counters followed by the
+/// connection arena high-water mark.
+pub fn tcp_telemetry(stats: &[u64; STAT_COUNT], watermark: u64) -> Vec<u64> {
+    let mut values = stats.to_vec();
+    values.push(watermark);
+    values
+}
+
+/// Common meaning of a timer request across native and Wasm engines.
+///
+/// The requested fields describe work before UMEM allocation. The host or
+/// native frame registry fills in `allocated_frames` after allocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineTimerPlan {
+    pub timeout_frames: u32,
+    pub packet_frames: u32,
+    pub allocated_frames: u32,
+    pub route: u32,
+}
+
+#[cfg(test)]
+mod timer_plan_tests {
+    use super::{
+        tcp_telemetry, EngineTimerPlan, FlowKey, TimeoutStack, STAT_COUNT, TCP_ROUTE_DROP,
+        TCP_ROUTE_LINUX, TCP_ROUTE_TX, TCP_STAT_NAMES, TCP_TELEMETRY_LEN, TCP_WATERMARK_INDEX,
+    };
+
+    #[test]
+    fn timer_plan_accounts_for_requests_and_allocation() {
+        let plan = EngineTimerPlan::new(12, 20, 0);
+        assert_eq!(plan.requested_frames(), 32);
+        assert_eq!(plan.with_allocated(7).allocated_frames, 7);
+        assert_eq!(plan.route, 0);
+    }
+
+    #[test]
+    fn telemetry_contract_has_stable_order_and_watermark() {
+        assert_eq!(TCP_STAT_NAMES.len(), STAT_COUNT);
+        assert_eq!(TCP_TELEMETRY_LEN, STAT_COUNT + 1);
+        assert_eq!(TCP_WATERMARK_INDEX, STAT_COUNT);
+        assert_eq!((TCP_ROUTE_TX, TCP_ROUTE_LINUX, TCP_ROUTE_DROP), (0, 1, 2));
+
+        let stats = [7; STAT_COUNT];
+        let telemetry = tcp_telemetry(&stats, 99);
+        assert_eq!(telemetry.len(), TCP_TELEMETRY_LEN);
+        assert_eq!(telemetry[TCP_WATERMARK_INDEX], 99);
+        assert_eq!(TCP_STAT_NAMES[0], "sent_syn");
+        assert_eq!(TCP_STAT_NAMES[STAT_COUNT - 1], "drop");
+    }
+
+    #[test]
+    fn boxed_timeout_stack_is_heap_backed() {
+        let mut stack = TimeoutStack::new_boxed();
+        assert_eq!(stack.available_capacity(), super::MAX_TIMEOUTS);
+        stack.push(FlowKey::empty());
+        assert!(stack.pop().is_some());
+    }
+}
+
+impl EngineTimerPlan {
+    pub const fn new(timeout_frames: u32, packet_frames: u32, route: u32) -> Self {
+        Self {
+            timeout_frames,
+            packet_frames,
+            allocated_frames: 0,
+            route,
+        }
+    }
+
+    #[inline]
+    pub const fn requested_frames(self) -> u32 {
+        self.timeout_frames.saturating_add(self.packet_frames)
+    }
+
+    #[inline]
+    pub const fn with_allocated(self, allocated_frames: u32) -> Self {
+        Self {
+            allocated_frames,
+            ..self
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GeneratorProtocol {
@@ -167,6 +284,23 @@ impl TimeoutStack {
         Self {
             items: [FlowKey::empty(); MAX_TIMEOUTS],
             len: 0,
+        }
+    }
+
+    /// Allocates the fixed-capacity timeout storage on the heap. Native nodes
+    /// use this during construction so the multi-megabyte backing array does
+    /// not pass through the main thread's stack.
+    pub fn new_boxed() -> alloc::boxed::Box<Self> {
+        let mut boxed = alloc::boxed::Box::<Self>::new_uninit();
+        unsafe {
+            let ptr = boxed.as_mut_ptr();
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!((*ptr).items) as *mut FlowKey,
+                0,
+                MAX_TIMEOUTS,
+            );
+            core::ptr::addr_of_mut!((*ptr).len).write(0);
+            boxed.assume_init()
         }
     }
 

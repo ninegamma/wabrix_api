@@ -330,7 +330,7 @@ impl Guest for GeneratorEngine {
     // - It is called before any other function in the plugin.
     // - The init_data function is called with the following arguments:
     //   - data: A vector of key-value pairs, where each pair is a (key, value) tuple.
-    //     The key value pairs are set in the .toml file for a node of type WasmEngine in the section "wasm_data"
+    //     The key value pairs are set in the .toml file for a node of type WasmEngine in the section "node_data"
     //   - tsc_frequency: The frequency of the TSC counter, in Hz.
     // - The init_data function should initialize the plugin's state, such as the connection pool
     //   or any other state that needs to be maintained across batches.

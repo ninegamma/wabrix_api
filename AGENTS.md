@@ -132,7 +132,7 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 * **`process-timers(current_tsc) -> u32`** — called periodically for `engine-plugin` to drive timer wheels (e.g., TCP retransmit). Returns the number of frames needed for timer-triggered transmits.
 * **`on-control-event(opcode, payload) -> bool`** — receives control plane commands. Opcodes 0x0000–0x0FFF are reserved `StandardOpcode` values; plugin-specific opcodes must start at 0x1000. Return `true` if the opcode was handled.
 * **`get-telemetry() -> list<u64>`** — returns out-of-band counters. If the list is empty, the host falls back to in-band (upper 16 bits of routing actions) telemetry.
-* **`init-data(data: list<tuple<string, string>>)`** — called once at startup with key/value config from the TOML `wasm_data` field. Initialize all plugin state here.
+* **`init-data(data: list<tuple<string, string>>)`** — called once at startup with key/value config from the TOML `node_data` field. Initialize all plugin state here.
 
 ---
 

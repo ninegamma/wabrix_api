@@ -58,6 +58,30 @@ pub enum StandardOpcode {
     Ping = 0x00FF,
 }
 
+/// Operational states shared by native and Wasm engine nodes.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationalState {
+    /// Stop synthetic generation while continuing normal packet processing.
+    Offline = 0,
+    /// Enable synthetic generation and normal packet processing.
+    Online = 1,
+    /// Stop generation and bypass packet processing.
+    Bypass = 2,
+}
+
+impl OperationalState {
+    /// Converts the wire payload used by StandardOpcode::SetOperationalState.
+    pub const fn from_payload(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Offline),
+            1 => Some(Self::Online),
+            2 => Some(Self::Bypass),
+            _ => None,
+        }
+    }
+}
+
 /// The overarching opcode representation that gracefully handles
 /// both standard system commands and custom plugin-specific commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,4 +138,33 @@ pub struct BatchMetadata {
 #[derive(Serialize, Deserialize)]
 pub struct HotWasmPayload {
     pub updates: HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OperationalState, PluginOpcode, StandardOpcode};
+
+    #[test]
+    fn standard_control_opcode_values_are_stable() {
+        assert_eq!(StandardOpcode::SetOperationalState as u32, 0x0001);
+        assert_eq!(StandardOpcode::FlushState as u32, 0x0002);
+        assert_eq!(StandardOpcode::UpdateConfiguration as u32, 0x0003);
+        assert_eq!(StandardOpcode::Ping as u32, 0x00FF);
+    }
+
+    #[test]
+    fn operational_state_payload_contract_is_shared() {
+        assert_eq!(OperationalState::from_payload(0), Some(OperationalState::Offline));
+        assert_eq!(OperationalState::from_payload(1), Some(OperationalState::Online));
+        assert_eq!(OperationalState::from_payload(2), Some(OperationalState::Bypass));
+        assert_eq!(OperationalState::from_payload(3), None);
+    }
+
+    #[test]
+    fn plugin_opcode_mapping_preserves_standard_values() {
+        assert_eq!(PluginOpcode::from(1), PluginOpcode::Standard(StandardOpcode::SetOperationalState));
+        assert_eq!(PluginOpcode::from(2), PluginOpcode::Standard(StandardOpcode::FlushState));
+        assert_eq!(PluginOpcode::from(3), PluginOpcode::Standard(StandardOpcode::UpdateConfiguration));
+        assert_eq!(PluginOpcode::from(255), PluginOpcode::Standard(StandardOpcode::Ping));
+    }
 }

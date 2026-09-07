@@ -7,20 +7,22 @@ use crate::wabrix::plugins::logging;
 use alloc::string::String;
 use alloc::vec::Vec;
 use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
-use wabrix_api::engine_common::{handle_control_event, ControlResult, WasmCell, WasmValue};
-use wabrix_api::helpers::{parse_ip, parse_mac, parse_suffixed_number};
+use wabrix_api::engine_common::{
+    handle_control_event, parse_tcp_engine_config, ControlResult, WasmCell, WasmValue,
+};
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::packet::Packet;
 use wabrix_api::{
     HotWasmPayload, PluginOpcode, StandardOpcode, MAX_BATCH_SIZE, TIMER_KIND_NONE,
     TIMER_KIND_TIMEOUT,
 };
-
+use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::tcp_common::{
-    run_tcp_state_machine, write_tcp_packet, PacketGenerator, TcpEngineConfig, TimeoutStack,
-    FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT,
-    STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN,
-    STAT_SENT_SYNACK, STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
+    run_tcp_state_machine, tcp_telemetry, write_tcp_packet, EngineTimerPlan, PacketGenerator,
+    TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE,
+    PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN,
+    STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
+    TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX, TCP_ROUTE_TX as ROUTE_TX,
 };
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -62,10 +64,6 @@ const TIMEOUT_SCAN_INTERVAL_DIVISOR: u64 = 1_000 / TIMEOUT_SCAN_INTERVAL_MILLIS;
 
 const MAX_CONNECTIONS: usize = 524_288;
 //const MAX_CONNECTIONS: usize = 1_048_576;
-
-const ROUTE_TX: u32 = 0;
-const ROUTE_LINUX: u32 = 1;
-const ROUTE_DROP: u32 = 2;
 
 #[inline]
 fn timeout_scan_interval_cycles(tsc_frequency: u64) -> u64 {
@@ -111,7 +109,6 @@ pub fn init_logging() {
     log::set_max_level(log::LevelFilter::Info); // Set your desired Wasm log level
 }
 
-
 fn init_state_machine(tcp_node_name: String) {
     // 524,288 is a power of 2. It will consume ~25MB of Wasm heap instantly at boot,
     // but it will NEVER trigger a resize or memory.grow during execution.
@@ -125,7 +122,7 @@ impl Guest for TcpEngine {
     // - It is called before any other function in the plugin.
     // - The init_data function is called with the following arguments:
     //   - data: A vector of key-value pairs, where each pair is a (key, value) tuple.
-    //     The key value pairs are set in the .toml file for a node of type WasmEngine in the section "wasm_data"
+    //     The key value pairs are set in the .toml file for a node of type WasmEngine in the section "node_data"
     //   - tsc_frequency: The frequency of the TSC counter, in Hz.
     // - The init_data function should initialize the plugin's state, such as the connection pool
     //   or any other state that needs to be maintained across batches.
@@ -137,92 +134,16 @@ impl Guest for TcpEngine {
         tsc_frequency: u64,
     ) -> bool {
         init_logging();
-        let mut config = TcpEngineConfig {
-            common: Default::default(),
-            ..Default::default()
-        };
-
-        let mut raw_src_ip: Option<alloc::string::String> = None;
-
-        for (key, value) in data {
-            match key.as_str() {
-                "name" => config.name = Some(value),
-                "src_mac" => {
-                    config.src_mac = parse_mac(&value);
-                    if config.src_mac.is_none() {
-                        return false;
-                    }
-                }
-                "dst_mac" => {
-                    config.dst_mac = parse_mac(&value);
-                    if config.dst_mac.is_none() {
-                        return false;
-                    }
-                }
-                "src_ip" => {
-                    raw_src_ip = Some(value.clone());
-                    config.src_ip = parse_ip(&value);
-                    if config.src_ip.is_none() {
-                        return false;
-                    }
-                }
-                "dst_ip" => {
-                    config.dst_ip = parse_ip(&value);
-                    if config.dst_ip.is_none() {
-                        return false;
-                    }
-                }
-                "rng_seed" => {
-                    config.rng_seed = value.parse::<u32>().ok();
-                    if config.rng_seed.is_none() {
-                        return false;
-                    }
-                }
-                "syn_rate" => {
-                    config.syn_rate = parse_suffixed_number(&value).ok();
-                    if config.syn_rate.is_none() {
-                        return false;
-                    }
-                }
-                "syn_limit" => {
-                    config.syn_limit = parse_suffixed_number(&value).ok();
-                    if config.syn_limit.is_none() {
-                        return false;
-                    }
-                }
-                "close_timeout" => {
-                    config.close_timeout_millis = value.parse::<u64>().ok();
-                    if config.close_timeout_millis.is_none() {
-                        return false;
-                    }
-                }
-                _ => {}
+        let (config, node_name) = match parse_tcp_engine_config(data, tsc_frequency) {
+            Ok(result) => result,
+            Err(error) => {
+                log::warn!("TCP engine initialization rejected: {}", error);
+                return false;
             }
-        }
-
-        // - Verify the presence of strictly required parameters.
-        // - Reject initialization if fundamental routing data is missing.
-        // - Note, dst_ip is not necessary for pure tcp servers, as they always reply to the client ip,
-        //   but we need always dst mac-address as we have no full Ethernet/IP control stack
-        if config.src_ip.is_none()
-            || config.src_mac.is_none()
-            || config.dst_mac.is_none()
-            || config.dst_ip.is_none() && config.syn_rate.is_some_and(|rate| rate > 0)
-        {
-            return false;
-        }
-
-        // - Resolve node name using fallback chain
-        let node_name = config
-            .name
-            .clone()
-            .or(raw_src_ip)
-            .unwrap_or_else(|| alloc::string::String::from("unknown"));
+        };
 
         init_state_machine(node_name);
 
-        config.tsc_frequency = tsc_frequency;
-        config.refresh_timeout_cycles();
         *CONFIG.borrow_mut() = Some(config);
 
         true
@@ -620,9 +541,10 @@ impl Guest for TcpEngine {
             }
         }
 
+        let plan = EngineTimerPlan::new(timeout_frames, packet_frames, ROUTE_TX);
         TimerPlan {
-            timeout_frames,
-            packet_frames,
+            timeout_frames: plan.timeout_frames,
+            packet_frames: plan.packet_frames,
         }
     }
 
@@ -740,12 +662,13 @@ impl Guest for TcpEngine {
         }
     }
     fn get_telemetry() -> Vec<u64> {
-        let mut stats = TCP_STATS.borrow().to_vec();
-        // Add current pool usage to stats
-        if let Some(pool) = CONNECTIONS.borrow().as_ref() {
-            stats.push(pool.watermark as u64); // Current active/reused nodes
-        }
-        stats
+        let stats = TCP_STATS.borrow();
+        let watermark = CONNECTIONS
+            .borrow()
+            .as_ref()
+            .map(|pool| pool.watermark as u64)
+            .unwrap_or(0);
+        tcp_telemetry(&stats, watermark)
     }
 }
 
@@ -791,6 +714,8 @@ fn flush_state(mode: u8) {
     // Clear the pending timeout teardowns so we don't send FINs for connections
     // that just got wiped out.
     TIMEOUT_QUEUE.borrow_mut().clear();
+    LAST_TIMEOUT_SCAN.set(0);
+    LAST_TIMER_LOG_TSC.set(0);
 
     // Reset the SYN generator tracking
     {
