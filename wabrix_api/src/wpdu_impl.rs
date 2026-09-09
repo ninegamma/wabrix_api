@@ -17,7 +17,7 @@ pub struct WPdu {
     pub desc_addr: u64,
 
     /// 4 Bytes: Data length
-    /// Corresponds to FrameDesc.lengths.data
+    /// Corresponds to FrameDesc.length
     pub desc_len: u32,
 
     /// 4 Bytes: XDP Options

@@ -144,7 +144,7 @@ fn prepare_syn_packet(
     );
 }
 
-#[inline(never)]
+#[inline]
 fn prepare_udp_packet(
     packet: &mut MailboxPacket<'_>,
     gen: &mut PacketGenerator,
@@ -185,7 +185,7 @@ struct GeneratorBatchConfig {
     tsc_frequency: u64,
 }
 
-#[inline(always)]
+#[inline]
 fn process_batch_for_protocol<const UDP: bool>(
     batch_size: u32,
     partition_offset: u32,
