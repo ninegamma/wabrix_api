@@ -104,6 +104,13 @@ impl<'a> Packet<'a> {
         self.pdu.timestamp = timestamp;
     }
 
+    /// Returns the hardware RX timestamp supplied by XDP metadata, or zero
+    /// when the driver did not provide one.
+    #[inline(always)]
+    pub fn rx_timestamp(&self) -> u64 {
+        self.pdu.rx_timestamp()
+    }
+
     #[inline(always)]
     pub fn data_len(&self) -> u32 {
         self.pdu.data_len()

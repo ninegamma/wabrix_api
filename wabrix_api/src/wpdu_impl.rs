@@ -30,11 +30,11 @@ pub struct WPdu {
     owner_id: u8,            // 1 byte
     pub flags: u8,           // 1 byte
     pub timer_kind: u8,      // 1 byte: TIMER_KIND_* classification
-    pub _padding: [u8; 8],   // 8 byte reserved padding
-
+    pub rx_timestamp: u64, // Hardware RX timestamp, when supplied by XDP metadata
     /// 8 Bytes: Telemetry
     pub timestamp: u64,
 }
+const _: () = assert!(core::mem::size_of::<WPdu>() == 56);
 
 impl WPdu {
     pub fn new(
@@ -73,7 +73,7 @@ impl Default for WPdu {
             owner_id: 0,
             flags: 0,
             timer_kind: 0,
-            _padding: [0; 8],
+            rx_timestamp: 0,
             timestamp: 0,
         }
     }
@@ -209,6 +209,19 @@ impl WPdu {
     #[inline(always)]
     pub fn set_timestamp(&mut self, timestamp: u64) {
         self.timestamp = timestamp;
+    }
+
+    /// Returns the hardware RX timestamp supplied by XDP metadata, or zero
+    /// when the driver did not provide one.
+    #[inline(always)]
+    pub fn rx_timestamp(&self) -> u64 {
+        self.rx_timestamp
+    }
+
+    /// Stores the hardware RX timestamp supplied by XDP metadata.
+    #[inline(always)]
+    pub fn set_rx_timestamp(&mut self, timestamp: u64) {
+        self.rx_timestamp = timestamp;
     }
 
     #[inline]
