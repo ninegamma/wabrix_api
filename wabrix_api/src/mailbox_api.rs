@@ -5,7 +5,8 @@ use crate::BatchMetadata;
 // MAILBOX-BASED ZERO-COPY API
 // =============================================================================
 
-/// A batch backed by the shared UMEM mailbox rather than an inline byte slice.
+/// A batch backed by the instance's private Wasm-memory mailbox rather than an
+/// inline byte slice.
 ///
 /// The host writes `pdus` into the `BatchMetadata` before calling `process-batch`.
 /// The plugin processes each packet in place, then writes routing decisions back
@@ -21,7 +22,9 @@ impl<'a> MailboxBatch<'a> {
     #[inline(always)]
     pub fn new(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> Self {
         let umem_base = (0u32).wrapping_sub(partition_offset) as usize;
-        let mailbox_ptr = (umem_base + mailbox_offset as usize) as *mut BatchMetadata;
+        // `mailbox_offset` is an address in the Wasm linear memory. Packet
+        // descriptors remain UMEM-relative and use `umem_base` below.
+        let mailbox_ptr = mailbox_offset as usize as *mut BatchMetadata;
 
         // SAFETY: The host guarantees `mailbox_ptr` points to a valid, exclusively-owned
         // `BatchMetadata` for the duration of the `process-batch` call.
