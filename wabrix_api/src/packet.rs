@@ -521,9 +521,9 @@ const _: () = assert!(size_of::<Pdu0>() == 64);
 
 impl<'a> PacketBatch<'a> {
     /// Safely constructs the batch from the raw Wasm inputs.
-    /// Hides the pointer casting and 2's complement math from the user.
+    /// Hides the pointer casting from the user.
     #[inline(always)]
-    pub fn new(batch_bytes: &'a mut [u8], partition_offset: u32) -> Self {
+    pub fn new(batch_bytes: &'a mut [u8], umem_offset: u32) -> Self {
         // SAFETY: `batch_bytes` is a `&mut [u8]` owned by the caller for lifetime `'a`, so the
         // pointer is valid and exclusively held. The host ABI guarantees the buffer contains a
         // contiguous array of packed `Pdu0` structs. `Pdu0` is `#[repr(C, align(64))]`; the
@@ -536,8 +536,8 @@ impl<'a> PacketBatch<'a> {
             )
         };
 
-        // Calculate the virtual UMEM address for this sandbox
-        let umem_base = (0u32).wrapping_sub(partition_offset) as usize;
+        // The host maps the shared UMEM at this positive Wasm-linear offset.
+        let umem_base = umem_offset as usize;
 
         Self { pdus, umem_base }
     }

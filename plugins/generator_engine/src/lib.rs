@@ -188,11 +188,11 @@ struct GeneratorBatchConfig {
 #[inline]
 fn process_batch_for_protocol<const UDP: bool>(
     batch_size: u32,
-    partition_offset: u32,
+    umem_offset: u32,
     mailbox_offset: u32,
     config: GeneratorBatchConfig,
 ) -> u32 {
-    let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+    let mut batch = MailboxBatch::new(batch_size, umem_offset, mailbox_offset);
     let mut stats = TCP_STATS.borrow_mut();
 
     for mut packet in batch.iter_mut() {
@@ -368,14 +368,14 @@ impl Guest for GeneratorEngine {
         true
     }
 
-    fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
+    fn process_batch(batch_size: u32, umem_offset: u32, mailbox_offset: u32) -> u32 {
 
         let config_guard = CONFIG.borrow();
         let Some(config) = config_guard.as_ref() else {
             // init_data is required to succeed before process_batch is called.
             // Fail closed if the host violates that lifecycle contract.
             drop(config_guard);
-            let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+            let mut batch = MailboxBatch::new(batch_size, umem_offset, mailbox_offset);
             for mut packet in batch.iter_mut() {
                 packet.set_action(ROUTE_DROP);
             }
@@ -395,13 +395,13 @@ impl Guest for GeneratorEngine {
         match protocol {
             GeneratorProtocol::Syn => process_batch_for_protocol::<false>(
                 batch_size,
-                partition_offset,
+                umem_offset,
                 mailbox_offset,
                 config,
             ),
             GeneratorProtocol::Udp => process_batch_for_protocol::<true>(
                 batch_size,
-                partition_offset,
+                umem_offset,
                 mailbox_offset,
                 config,
             ),

@@ -782,16 +782,16 @@ impl Pdu0 {
     }
 
     /// Returns a mutable slice to the packet data.
-    /// `offset` is the partition_offset provided by the Host.
+    /// `offset` is the positive UMEM offset provided by the host.
     ///
     /// # Safety
-    /// The caller must ensure `offset` is the exact `partition_offset` received from the host
-    /// ABI (i.e., `umem_base = 0u32.wrapping_sub(offset)`). The resulting slice covers the
+    /// The caller must ensure `offset` is the exact `umem_offset` received from the host
+    /// ABI (i.e., `umem_base = offset`). The resulting slice covers the
     /// full frame (`frame_size()` bytes) starting at `desc_addr`; the caller must not create
     /// overlapping mutable slices into the same frame.
     #[inline(always)]
     pub unsafe fn data_mut(&mut self, offset: u32) -> &mut [u8] {
-        let umem_addr = (0u32).wrapping_sub(offset) as usize;
+        let umem_addr = offset as usize;
         let ptr = self.w.data_ptr(umem_addr);
         // SAFETY: `ptr` is `umem_base + desc_addr` — a valid address within the WASM linear
         // memory region for this frame. `frame_size()` is the pre-allocated frame capacity;
@@ -807,12 +807,12 @@ impl Pdu0 {
         mac: &MacHeader,
         ip: &IpHeader,
         tcp: &TcpHeader,
-        partition_offset: u32,
+        umem_offset: u32,
     ) -> u32 {
-        // SAFETY: `partition_offset` comes directly from the host ABI; `data_mut` is called
+        // SAFETY: `umem_offset` comes directly from the host ABI; `data_mut` is called
         // once and its result is used exclusively within this function — no other reference
         // to the same frame is live concurrently.
-        let data = unsafe { self.data_mut(partition_offset) };
+        let data = unsafe { self.data_mut(umem_offset) };
 
         let mac_len = core::mem::size_of::<MacHeader>();
         let ip_len = core::mem::size_of::<IpHeader>();

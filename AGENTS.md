@@ -126,9 +126,9 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 
 > Full WIT definition: `wit/xbricks.wit`
 
-* **`inspect-batch(batch_bytes, partition_offset) -> list<u32>`** — called on each burst for `filter-plugin` and `inspector` nodes. Each `u32` in the return list is a routing action for the corresponding PDU: lower 8 bits = route ID, bit 8 = `TELEMETRY_FLAG`.
-* **`process-batch(batch_bytes, partition_offset) -> (list<u32>, list<u32>)`** — called on each burst for `engine-plugin` nodes. Returns routing actions (same encoding as above) plus new packet lengths (for plugins that modify packet size).
-* **`generate-batch(batch_bytes, partition_offset) -> list<u32>`** — called on each burst for `generator-plugin` nodes. Writes packet headers into the provided buffer and returns the length of each generated packet.
+* **`inspect-batch(batch_bytes, umem_offset) -> list<u32>`** — called on each burst for `filter-plugin` and `inspector` nodes. `umem_offset` is the positive Wasm-linear offset where the shared UMEM begins. Each `u32` in the return list is a routing action for the corresponding PDU: lower 8 bits = route ID, bit 8 = `TELEMETRY_FLAG`.
+* **`process-batch(batch_bytes, umem_offset) -> (list<u32>, list<u32>)`** — called on each burst for `engine-plugin` nodes. `umem_offset` is the positive Wasm-linear offset where the shared UMEM begins. Returns routing actions (same encoding as above) plus new packet lengths (for plugins that modify packet size).
+* **`generate-batch(batch_bytes, umem_offset) -> list<u32>`** — called on each burst for `generator-plugin` nodes. `umem_offset` is the positive Wasm-linear offset where the shared UMEM begins. Writes packet headers into the provided buffer and returns the length of each generated packet.
 * **`process-timers(current_tsc) -> u32`** — called periodically for `engine-plugin` to drive timer wheels (e.g., TCP retransmit). Returns the number of frames needed for timer-triggered transmits.
 * **`on-control-event(opcode, payload) -> bool`** — receives control plane commands. Opcodes 0x0000–0x0FFF are reserved `StandardOpcode` values; plugin-specific opcodes must start at 0x1000. Return `true` if the opcode was handled.
 * **`get-telemetry() -> list<u64>`** — returns out-of-band counters. If the list is empty, the host falls back to in-band (upper 16 bits of routing actions) telemetry.

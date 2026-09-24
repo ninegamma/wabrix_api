@@ -96,8 +96,8 @@ impl Guest for FilterEngine {
     }
 
     // Scans packet payloads and routes them based on signature presence
-    fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
-        let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+    fn process_batch(batch_size: u32, umem_offset: u32, mailbox_offset: u32) -> u32 {
+        let mut batch = MailboxBatch::new(batch_size, umem_offset, mailbox_offset);
         let mut config_guard = CONFIG.borrow_mut();
 
         let Some(config) = config_guard.as_mut() else {

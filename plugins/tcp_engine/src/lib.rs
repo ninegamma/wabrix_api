@@ -149,13 +149,13 @@ impl Guest for TcpEngine {
         true
     }
 
-    fn process_batch(batch_size: u32, partition_offset: u32, mailbox_offset: u32) -> u32 {
+    fn process_batch(batch_size: u32, umem_offset: u32, mailbox_offset: u32) -> u32 {
         log::trace!(
-            "process_batch: batch_size={}, partition_offset={}",
+            "process_batch: batch_size={}, umem_offset={}",
             batch_size,
-            partition_offset
+            umem_offset
         );
-        let mut batch = MailboxBatch::new(batch_size, partition_offset, mailbox_offset);
+        let mut batch = MailboxBatch::new(batch_size, umem_offset, mailbox_offset);
 
         // - Keep the configuration borrowed for the duration of the batch
         // - Prevents heap allocation of the node name string on the hot path
