@@ -42,8 +42,8 @@ fn sum_be_words(data: &[u8], skipword: usize) -> u32 {
     // Process 16-bit big-endian words without assuming alignment of `data`.
     let mut sum = 0u32;
 
-    let mut chunks = data.chunks_exact(2);
-    for (i, chunk) in chunks.by_ref().enumerate() {
+    let (chunks, remainder) = data.as_chunks::<2>();
+    for (i, chunk) in chunks.iter().enumerate() {
         if i != skipword {
             // chunk has length 2
             let word = u16::from_be_bytes([chunk[0], chunk[1]]);
@@ -52,7 +52,7 @@ fn sum_be_words(data: &[u8], skipword: usize) -> u32 {
     }
 
     // If the length is odd, make sure to checksum the final byte
-    if let [last] = chunks.remainder() {
+    if let [last] = remainder {
         sum += (*last as u32) << 8;
     }
 

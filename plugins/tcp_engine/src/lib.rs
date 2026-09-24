@@ -35,11 +35,10 @@ wit_bindgen::generate!({
 // ZERO-COST WASM STATE CONTAINERS
 // =====================================================================
 
-/// A zero-cost, single-threaded state container for WASM.
-/// Uses `RefCell` to prevent re-entrancy panics, but uses NO ATOMICS.
-
-/// An even faster container for simple Copy types (like u64).
-/// Uses `Cell`, which doesn't even have a borrow counter. Absolute zero overhead.
+// A zero-cost, single-threaded state container for WASM.
+// Uses `RefCell` to prevent re-entrancy panics, but uses NO ATOMICS.
+// An even faster container for simple Copy types (like u64).
+// Uses `Cell`, which doesn't even have a borrow counter. Absolute zero overhead.
 static CONFIG: WasmCell<Option<TcpEngineConfig>> = WasmCell::new(None);
 static CONNECTIONS: WasmCell<Option<ConnectionPool>> = WasmCell::new(None);
 static TIMEOUT_QUEUE: WasmCell<TimeoutStack> = WasmCell::new(TimeoutStack::new());
@@ -515,14 +514,11 @@ impl Guest for TcpEngine {
                 || current_tsc.saturating_sub(last_timer_log_tsc) >= 30 * tsc_freq
             {
                 LAST_TIMER_LOG_TSC.set(current_tsc);
-                let timestamp_micros = if tsc_freq > 0 {
-                    current_tsc
-                        .saturating_sub(RUN_START_TSC.get())
-                        .saturating_mul(1_000_000)
-                        / tsc_freq
-                } else {
-                    0
-                };
+                let timestamp_micros = current_tsc
+                    .saturating_sub(RUN_START_TSC.get())
+                    .saturating_mul(1_000_000)
+                    .checked_div(tsc_freq)
+                    .unwrap_or(0);
                 let timestamp_ms = timestamp_micros / 1_000;
                 let timestamp_ms_fraction = timestamp_micros % 1_000;
                 let delta_ms = syn_delta_tsc as f64 * 1_000.0 / tsc_freq as f64;

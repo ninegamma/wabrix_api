@@ -214,7 +214,7 @@ fn process_batch_for_protocol<const UDP: bool>(
                 // Evaluate generation limits idiomatically
                 let under_limit = config
                     .generation_limit
-                    .map_or(true, |max| gen.packets_sent < max || max == 0);
+                    .is_none_or(|max| gen.packets_sent < max || max == 0);
 
                 if !gen.activated || !under_limit {
                     stats[STAT_DROP] += 1;
@@ -278,11 +278,9 @@ fn process_batch_for_protocol<const UDP: bool>(
                         };
 
                         let packets = gen.packets_sent as u128;
-                        let packets_per_second = if elapsed_micros > 0 {
-                            packets * 1_000_000 / elapsed_micros
-                        } else {
-                            0
-                        };
+                        let packets_per_second = (packets * 1_000_000)
+                            .checked_div(elapsed_micros)
+                            .unwrap_or(0);
 
                         #[cfg(feature = "runtime-diagnostics")]
                         log::info!(
@@ -469,7 +467,7 @@ impl Guest for GeneratorEngine {
                 );
 
                 // Calculate how many frames the cycles allow
-                let available_frames = (gen.cycle_accumulator / tsc_freq) as u64;
+                let available_frames = gen.cycle_accumulator / tsc_freq;
                 #[cfg(feature = "runtime-diagnostics")]
                 let available_bucket = match available_frames {
                     0 => 0,

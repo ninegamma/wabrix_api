@@ -188,14 +188,11 @@ impl Ipv6Header {
 
     #[inline]
     pub fn src_bytes(&self) -> &[u8; 16] {
-        // SAFETY:
-        // - Returning a reference directly to an array field within a packed struct requires caution.
-        // - Callers must treat this as unaligned or copy bytes if safety guarantees are strict.
-        unsafe { &*(&raw const self.src_ip) }
+        &self.src_ip
     }
 
     #[inline]
     pub fn dst_bytes(&self) -> &[u8; 16] {
-        unsafe { &*(&raw const self.dst_ip) }
+        &self.dst_ip
     }
 }

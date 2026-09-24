@@ -25,7 +25,7 @@ impl SeparatedString for u128 {
         let mut result = String::with_capacity(value.len() + value.len() / 3);
 
         for (index, character) in value.chars().enumerate() {
-            if index > 0 && (value.len() - index) % 3 == 0 {
+            if index > 0 && (value.len() - index).is_multiple_of(3) {
                 result.push(',');
             }
             result.push(character);

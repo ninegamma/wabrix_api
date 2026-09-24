@@ -51,7 +51,7 @@ impl fmt::Display for FiveTupleV4 {
 
         write!(
             f,
-            "src_ip={}, dst_ip= {}, src_port= {:#04x}, dst_port= {:#04x}, proto= {:#02x}",
+            "src_ip={}, dst_ip= {}, src_port= {:#04x}, dst_port= {:#04x}, proto= {:#x}",
             Ipv4Addr::from(src_ip),
             Ipv4Addr::from(dst_ip),
             src_port,
