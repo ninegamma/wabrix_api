@@ -3,22 +3,8 @@ use crate::headers::{
     UdpHeader,
 };
 use core::fmt;
-
-const MAX_HEADERS: usize = 5;
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct HeaderStack {
-    /// Offsets relative to base_addr
-    pub offsets: [u16; MAX_HEADERS],
-    /// The type of header (Mac, Ip, etc.)
-    pub kinds: [HeaderKind; MAX_HEADERS],
-    /// Current count
-    pub hc: u8,
-}
-
-// Exactly 16 bytes.
-const _: () = assert!(core::mem::size_of::<HeaderStack>() == 16);
+pub use crate::shared_memory::HeaderStack;
+use crate::shared_memory::MAX_HEADERS;
 
 impl HeaderStack {
     #[inline]
@@ -267,6 +253,12 @@ impl HeaderStack {
         // SAFETY: Same invariant as `tcp`; offset was stored from a valid `&IcmpHeader` reference,
         // and `&self` prevents concurrent mutable access.
         unsafe { &*(addr as *const IcmpHeader) }
+    }
+}
+
+impl Default for HeaderStack {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

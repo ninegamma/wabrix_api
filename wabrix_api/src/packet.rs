@@ -1,13 +1,13 @@
-use crate::exports::Pdu0;
 use crate::headers::{
     ArpIpv4Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader,
 };
 use crate::hstack::HeaderStack;
+use crate::shared_memory::SharedPdu;
 use core::slice;
 
 /// The safe, high-level interface for a single packet.
 pub struct Packet<'a> {
-    pdu: &'a mut Pdu0,
+    pdu: &'a mut SharedPdu,
     umem_base: usize,
 }
 
@@ -18,7 +18,7 @@ impl<'a> Packet<'a> {
 
     /// Internal constructor.
     #[inline(always)]
-    pub fn new(pdu: &'a mut Pdu0, umem_base: usize) -> Self {
+    pub fn new(pdu: &'a mut SharedPdu, umem_base: usize) -> Self {
         Self { pdu, umem_base }
     }
 
@@ -513,11 +513,11 @@ impl<'a> Packet<'a> {
 
 /// A safe, zero-cost wrapper around the raw linear memory passed to Wasm.
 pub struct PacketBatch<'a> {
-    pub(crate) pdus: &'a mut [Pdu0],
+    pub(crate) pdus: &'a mut [SharedPdu],
     pub(crate) umem_base: usize,
 }
 
-const _: () = assert!(size_of::<Pdu0>() == 64);
+const _: () = assert!(size_of::<SharedPdu>() == 64);
 
 impl<'a> PacketBatch<'a> {
     /// Safely constructs the batch from the raw Wasm inputs.
@@ -531,8 +531,8 @@ impl<'a> PacketBatch<'a> {
         // caller must ensure the buffer is 64-byte aligned (guaranteed by the WASM host ABI).
         let pdus = unsafe {
             slice::from_raw_parts_mut(
-                batch_bytes.as_mut_ptr() as *mut Pdu0,
-                batch_bytes.len() / core::mem::size_of::<Pdu0>(),
+                batch_bytes.as_mut_ptr() as *mut SharedPdu,
+                batch_bytes.len() / core::mem::size_of::<SharedPdu>(),
             )
         };
 
@@ -565,7 +565,7 @@ impl<'a> PacketBatch<'a> {
 
 /// The Iterator that instantiates `Packet` wrappers on the fly
 pub struct PacketBatchIter<'a> {
-    iter: core::slice::IterMut<'a, Pdu0>,
+    iter: core::slice::IterMut<'a, SharedPdu>,
     umem_base: usize,
 }
 

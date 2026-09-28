@@ -1,7 +1,6 @@
 #![no_std]
 extern crate alloc;
 
-use crate::wpdu_impl::Pdu0;
 use alloc::string::String;
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
@@ -10,6 +9,7 @@ pub mod headers;
 pub mod helpers;
 pub mod mailbox_api;
 pub mod packet;
+pub mod shared_memory;
 // Declare the implementation file, but keep it hidden from the outside world.
 mod wpdu_impl;
 // Declare the routing module as public.
@@ -20,8 +20,9 @@ pub mod exports;
 mod hstack;
 pub mod tcp_common;
 
-/// The maximum number of packets in a single batch.
-pub const MAX_BATCH_SIZE: usize = 512;
+pub use shared_memory::{
+    BatchMetadata, SharedMailbox, SharedPdu, WpduCore, MAX_BATCH_SIZE,
+};
 
 /// Timer frame kinds stored in the reserved WPdu padding byte.
 pub const TIMER_KIND_NONE: u8 = 0;
@@ -123,16 +124,6 @@ impl From<PluginOpcode> for u32 {
             PluginOpcode::UnknownReserved(val) => val,
         }
     }
-}
-
-/// Shared zero-copy mailbox between host and plugin.
-/// Layout MUST match `wabrix_base::mailbox::BatchMetadata` on the host exactly.
-#[repr(C)]
-pub struct BatchMetadata {
-    /// Written by host before calling process-batch: AF_XDP frame descriptor offsets (UMEM-relative)
-    pub pdus: [Pdu0; MAX_BATCH_SIZE],
-    /// Written by plugin during process-batch: routing decisions (route_id)
-    pub actions: [u32; MAX_BATCH_SIZE],
 }
 
 #[derive(Serialize, Deserialize)]

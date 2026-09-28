@@ -1,5 +1,5 @@
 use crate::packet::{Packet, PacketBatch, PacketBatchIter};
-use crate::BatchMetadata;
+use crate::shared_memory::SharedMailbox;
 
 // =============================================================================
 // MAILBOX-BASED ZERO-COPY API
@@ -8,7 +8,7 @@ use crate::BatchMetadata;
 /// A batch backed by the instance's private Wasm-memory mailbox rather than an
 /// inline byte slice.
 ///
-/// The host writes `pdus` into the `BatchMetadata` before calling `process-batch`.
+/// The host writes `pdus` into the shared mailbox before calling `process-batch`.
 /// The plugin processes each packet in place, then writes routing decisions back
 /// into `actions`.
 /// A batch of mailbox packets, wrapping a standard `PacketBatch`.
@@ -24,10 +24,10 @@ impl<'a> MailboxBatch<'a> {
         let umem_base = umem_offset as usize;
         // `mailbox_offset` is an address in the Wasm linear memory. Packet
         // descriptors remain UMEM-relative and use `umem_base` below.
-        let mailbox_ptr = mailbox_offset as usize as *mut BatchMetadata;
+        let mailbox_ptr = mailbox_offset as usize as *mut SharedMailbox;
 
         // SAFETY: The host guarantees `mailbox_ptr` points to a valid, exclusively-owned
-        // `BatchMetadata` for the duration of the `process-batch` call.
+        // `SharedMailbox` for the duration of the `process-batch` call.
         let mailbox = unsafe { &mut *mailbox_ptr };
         let len = batch_size as usize;
 

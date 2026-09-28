@@ -1,40 +1,12 @@
+//! Guest-local behavior for the shared-memory packet layouts.
+
 use crate::headers::{
     ArpIpv4Header, EndOffset, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader,
     TcpHeader, UdpHeader, MAC_HDR_SIZE,
 };
-use crate::hstack::HeaderStack;
+use crate::shared_memory::{HeaderStack, Pdu0, WPdu};
 use core::ptr;
 // Adjust imports as needed
-
-#[repr(C)]
-#[derive(Clone, Debug)]
-pub struct WPdu {
-    /// 16 Bytes: HeaderStack
-    pub header_stack: HeaderStack,
-
-    /// 8 Bytes: The data pointer (absolute UMEM offset)
-    /// Corresponds to FrameDesc.addr
-    pub desc_addr: u64,
-
-    /// 4 Bytes: Data length
-    /// Corresponds to FrameDesc.length
-    pub desc_len: u32,
-
-    /// 4 Bytes: XDP Options
-    /// Corresponds to FrameDesc.options
-    pub desc_options: u32,
-
-    /// 16 Bytes: Metadata
-    global_frame_idx: u32, // 4 bytes, identifies the frame over all UMEM instances and partitions
-    pub frame_size_log2: u8, // 1 byte - log2(frame_size) for bit-shift calculations
-    owner_id: u8,            // 1 byte
-    pub flags: u8,           // 1 byte
-    pub timer_kind: u8,      // 1 byte: TIMER_KIND_* classification
-    pub rx_timestamp: u64, // Hardware RX timestamp, when supplied by XDP metadata
-    /// 8 Bytes: Telemetry
-    pub timestamp: u64,
-}
-const _: () = assert!(core::mem::size_of::<WPdu>() == 56);
 
 impl WPdu {
     pub fn new(
@@ -57,9 +29,6 @@ impl WPdu {
         }
     }
 }
-
-const _: () = assert!(core::mem::size_of::<WPdu>() == 56);
-const _: () = assert!(core::mem::size_of::<HeaderStack>() == 16);
 
 impl Default for WPdu {
     fn default() -> Self {
@@ -714,33 +683,6 @@ impl WPdu {
             None
         }
     }
-}
-
-#[repr(C, align(64))]
-pub struct Pdu0 {
-    /// Wasm-facing packet handle used in the batch ABI.
-    ///
-    /// `Pdu0` is the representation placed in the Wasm linear-memory batch. The
-    /// first 56 bytes are the portable [`WPdu`] packet state: packet data
-    /// location and length, parsed-header information, frame identity, and
-    /// routing metadata. Wasm code accesses that state through `Deref` and
-    /// `DerefMut` without knowing anything about the native host runtime.
-    ///
-    /// The host owns the underlying UMEM frame and is responsible for returning
-    /// it to the appropriate frame registry. A plugin must therefore return a
-    /// `Pdu0` through the batch/host protocol rather than allowing it to be
-    /// dropped locally.
-    ///
-    /// `Pdu0` deliberately has the same 64-byte C layout as the host-side `Pdu`:
-    /// a 56-byte [`WPdu`] followed by an opaque 8-byte host-only field. Keep the
-    /// field order, size, and alignment stable because the host and Wasm sides
-    /// exchange arrays of these values directly.
-    ///
-    pub w: WPdu,
-    /// Opaque host-only state. The native host stores its `SystemBus` pointer
-    /// here; Wasm must never read or modify it. Keeping it outside [`WPdu`]
-    /// preserves a pointer-free, portable 56-byte packet core for Wasm.
-    _do_not_touch_padding: u64,
 }
 
 // This lets you call `packet.parse_fast()` directly on Pdu0 in Wasm!
