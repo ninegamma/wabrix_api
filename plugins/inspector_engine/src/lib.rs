@@ -8,6 +8,8 @@ use core::cell::{Ref, RefCell, RefMut};
 
 use crate::exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
 use crate::wabrix::plugins::logging;
+use macaddr::MacAddr6;
+use wabrix_api::helpers::parse_mac;
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::{HotWasmPayload, PluginOpcode, StandardOpcode};
 
@@ -41,6 +43,8 @@ impl<T> WasmCell<T> {
 #[derive(Default)]
 struct InspectorConfig {
     bypass: bool,
+    src_mac: Option<[u8; 6]>,
+    dst_mac: Option<[u8; 6]>,
     tsc_frequency: u64,
     packets_inspected: u64,
     bytes_inspected: u64,
@@ -52,6 +56,8 @@ struct InspectorConfig {
 
 static CONFIG: WasmCell<InspectorConfig> = WasmCell::new(InspectorConfig {
     bypass: false,
+    src_mac: None,
+    dst_mac: None,
     tsc_frequency: 0,
     packets_inspected: 0,
     bytes_inspected: 0,
@@ -112,12 +118,20 @@ fn init_logging() {
 struct InspectorEngine;
 
 impl Guest for InspectorEngine {
-    fn init_data(_data: Vec<(String, String)>, tsc_frequency: u64) -> bool {
+    fn init_data(data: Vec<(String, String)>, tsc_frequency: u64) -> bool {
         init_logging();
-        *CONFIG.borrow_mut() = InspectorConfig {
+        let mut config = InspectorConfig {
             tsc_frequency,
             ..InspectorConfig::default()
         };
+        for (key, value) in data {
+            match key.as_str() {
+                "src_mac" => config.src_mac = parse_mac(&value),
+                "dst_mac" => config.dst_mac = parse_mac(&value),
+                _ => {}
+            }
+        }
+        *CONFIG.borrow_mut() = config;
         log::info!("InspectorEngine initialized");
         true
     }
@@ -170,6 +184,22 @@ impl Guest for InspectorEngine {
                 packet.set_action(ROUTE_TX);
             } else {
                 packet.set_action(ROUTE_TX);
+            }
+
+            // The packet crossed the cable and is being sent back through the
+            // receiving interface. Apply the configured reverse Ethernet
+            // addresses so the frame reaches the other NIC port.
+            if let Some(mac) = config.src_mac {
+                let mac = MacAddr6::from(mac);
+                if let Some(header) = packet.mac_header_mut() {
+                    header.set_smac(&mac);
+                }
+            }
+            if let Some(mac) = config.dst_mac {
+                let mac = MacAddr6::from(mac);
+                if let Some(header) = packet.mac_header_mut() {
+                    header.set_dmac(&mac);
+                }
             }
 
             processed += 1;
