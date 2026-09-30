@@ -11,7 +11,11 @@ use crate::wabrix::plugins::logging;
 use macaddr::MacAddr6;
 use wabrix_api::helpers::parse_mac;
 use wabrix_api::mailbox_api::MailboxBatch;
-use wabrix_api::{HotWasmPayload, PluginOpcode, StandardOpcode};
+use wabrix_api::{
+    HotWasmPayload, PluginOpcode, StandardOpcode, INSPECTOR_DELAY_HISTOGRAM_BUCKETS,
+    INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US, INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS,
+    INSPECTOR_DELAY_HISTOGRAM_MAGIC,
+};
 
 wit_bindgen::generate!({
     path: "../../wit/wabrix.wit",
@@ -40,7 +44,6 @@ impl<T> WasmCell<T> {
     }
 }
 
-#[derive(Default)]
 struct InspectorConfig {
     bypass: bool,
     src_mac: Option<[u8; 6]>,
@@ -52,6 +55,27 @@ struct InspectorConfig {
     delay_samples: u64,
     mean_delay_us: f64,
     delay_m2: f64,
+    delay_sum_us: u64,
+    delay_histogram: [u64; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
+}
+
+impl Default for InspectorConfig {
+    fn default() -> Self {
+        Self {
+            bypass: false,
+            src_mac: None,
+            dst_mac: None,
+            tsc_frequency: 0,
+            packets_inspected: 0,
+            bytes_inspected: 0,
+            unexpected: 0,
+            delay_samples: 0,
+            mean_delay_us: 0.0,
+            delay_m2: 0.0,
+            delay_sum_us: 0,
+            delay_histogram: [0; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
+        }
+    }
 }
 
 static CONFIG: WasmCell<InspectorConfig> = WasmCell::new(InspectorConfig {
@@ -65,6 +89,8 @@ static CONFIG: WasmCell<InspectorConfig> = WasmCell::new(InspectorConfig {
     delay_samples: 0,
     mean_delay_us: 0.0,
     delay_m2: 0.0,
+    delay_sum_us: 0,
+    delay_histogram: [0; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
 });
 
 fn packet_delay_us(receive_tsc: u64, send_tsc: u64, tsc_frequency: u64) -> Option<u64> {
@@ -73,7 +99,42 @@ fn packet_delay_us(receive_tsc: u64, send_tsc: u64, tsc_frequency: u64) -> Optio
     }
 
     let elapsed_cycles = receive_tsc - send_tsc;
-    Some(((elapsed_cycles as u128 * 1_000_000) / tsc_frequency as u128) as u64)
+    // Normal packet delays need only a native multiply and divide, avoiding
+    // Wasm's software implementation of wide integer division.
+    if let Some(scaled_cycles) = elapsed_cycles.checked_mul(1_000_000) {
+        return Some(scaled_cycles / tsc_frequency);
+    }
+
+    let seconds = elapsed_cycles / tsc_frequency;
+    let remainder = elapsed_cycles % tsc_frequency;
+    let fractional_us = if let Some(scaled_remainder) = remainder.checked_mul(1_000_000) {
+        scaled_remainder / tsc_frequency
+    } else {
+        // Compute the fractional part exactly even for unusually large TSC
+        // frequencies. Modular doubling/addition keeps every intermediate u64.
+        let mut fraction = 0u64;
+        let mut residual = 0u64;
+        for bit in (0..20).rev() {
+            fraction *= 2;
+            if residual >= tsc_frequency - residual {
+                residual -= tsc_frequency - residual;
+                fraction += 1;
+            } else {
+                residual *= 2;
+            }
+            if (1_000_000u64 >> bit) & 1 != 0 {
+                if residual >= tsc_frequency - remainder {
+                    residual -= tsc_frequency - remainder;
+                    fraction += 1;
+                } else {
+                    residual += remainder;
+                }
+            }
+        }
+        fraction
+    };
+    // Preserve the original narrowing cast's wraparound for oversized results.
+    Some(seconds.wrapping_mul(1_000_000).wrapping_add(fractional_us))
 }
 
 fn square_root(value: f64) -> f64 {
@@ -177,6 +238,15 @@ impl Guest for InspectorEngine {
                         config.mean_delay_us += delta / config.delay_samples as f64;
                         let delta_after_mean = delay - config.mean_delay_us;
                         config.delay_m2 += delta * delta_after_mean;
+                        config.delay_sum_us = config.delay_sum_us.saturating_add(delay_us);
+                        // Prometheus bounds are inclusive (le=10us), so a
+                        // sample exactly on a boundary belongs in that bucket.
+                        let bucket = (delay_us.saturating_sub(1)
+                            / INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US)
+                            .min(INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS as u64)
+                            as usize;
+                        config.delay_histogram[bucket] =
+                            config.delay_histogram[bucket].saturating_add(1);
                     }
                     None => config.unexpected += 1,
                 }
@@ -245,14 +315,63 @@ impl Guest for InspectorEngine {
         let average_delay_us = (config.mean_delay_us + 0.5) as u64;
         let standard_deviation_us = (square_root(variance) + 0.5) as u64;
 
-        alloc::vec![
+        let mut telemetry = alloc::vec![
             config.packets_inspected,
             config.bytes_inspected,
             config.unexpected,
             average_delay_us,
             standard_deviation_us,
-        ]
+            INSPECTOR_DELAY_HISTOGRAM_MAGIC,
+            config.delay_sum_us,
+        ];
+        // Keep the wire layout explicit: five existing values, the marker,
+        // the exact delay sum in microseconds, then disjoint 10 us bucket counts.
+        telemetry.extend_from_slice(&config.delay_histogram);
+        telemetry
     }
 }
 
 export!(InspectorEngine);
+
+#[cfg(test)]
+mod tests {
+    use super::packet_delay_us;
+
+    #[test]
+    fn packet_delay_rejects_invalid_timestamps_and_frequency() {
+        assert_eq!(packet_delay_us(10, 0, 0), None);
+        assert_eq!(packet_delay_us(9, 10, 1), None);
+        assert_eq!(packet_delay_us(10, 10, 1), Some(0));
+    }
+
+    #[test]
+    fn packet_delay_matches_wide_arithmetic() {
+        let values = [
+            1,
+            999_999,
+            1_000_000,
+            3_000_000_000,
+            u64::MAX / 1_000_000,
+            u64::MAX / 1_000_000 + 1,
+            u64::MAX / 2,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let check = |elapsed: u64, frequency: u64| {
+            let expected = ((elapsed as u128 * 1_000_000) / frequency as u128) as u64;
+            assert_eq!(packet_delay_us(elapsed, 0, frequency), Some(expected));
+        };
+        for elapsed in values {
+            for frequency in values {
+                check(elapsed, frequency);
+            }
+        }
+        let mut state = 42u64;
+        for _ in 0..10_000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let elapsed = state;
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            check(elapsed, state.max(1));
+        }
+    }
+}

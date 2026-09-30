@@ -2,9 +2,9 @@ use crate::headers::{
     ArpIpv4Header, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader,
     UdpHeader,
 };
-use core::fmt;
 pub use crate::shared_memory::HeaderStack;
 use crate::shared_memory::MAX_HEADERS;
+use core::fmt;
 
 impl HeaderStack {
     #[inline]
