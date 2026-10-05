@@ -2,6 +2,25 @@ package wabrix:plugins@0.1.0;
     
 /// The interface for nodes that inspect and modify packets, e.g. running a TCP stack.
 interface packet-engine {
+    /// A cumulative histogram metric reported by a packet-engine plugin.
+    record histogram {
+        name: string,
+        sum: u64,
+        count: u64,
+        buckets: list<u64>,
+    }
+
+    record counter {
+        name: string,
+        value: u64,
+    }
+
+    /// A telemetry payload can contain ordinary counters and structured metrics.
+    variant telemetry-metric {
+        counter(counter),
+        hist(histogram),
+    }
+
     /// Exact timer workload requested for the next batch.
     record timer-plan {
         timeout-frames: u32,
@@ -22,9 +41,10 @@ interface packet-engine {
     // The universal control event receiver
     on-control-event: func(opcode: u32, payload: list<u8>) -> bool;
 
-    /// Returns out-of-band telemetry.
-    /// If empty [], the host will fall back to in-band (upper 16 bits) telemetry.
-    get-telemetry: func() -> list<u64>;
+    /// Returns out-of-band telemetry. Counter entries retain their configured
+    /// order; structured metrics may appear alongside them. An empty list
+    /// means that no telemetry snapshot is available for this poll.
+    get-telemetry: func() -> list<telemetry-metric>;
 }
 
 interface logging {

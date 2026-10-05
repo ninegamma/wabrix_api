@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
+use exports::wabrix::plugins::packet_engine::{Counter, Guest, TelemetryMetric, TimerPlan};
 use postcard;
 use wabrix::plugins::logging;
 use wabrix_api::mailbox_api::MailboxBatch;
@@ -208,12 +208,30 @@ impl Guest for FilterEngine {
     }
 
     // Exposes statistics to the host metrics server
-    fn get_telemetry() -> Vec<u64> {
+    fn get_telemetry() -> Vec<TelemetryMetric> {
         let guard = CONFIG.borrow();
         if let Some(config) = guard.as_ref() {
-            alloc::vec![config.packets_forwarded, config.packets_dropped]
+            alloc::vec![
+                TelemetryMetric::Counter(Counter {
+                    name: String::from("packets_forwarded"),
+                    value: config.packets_forwarded,
+                }),
+                TelemetryMetric::Counter(Counter {
+                    name: String::from("packets_dropped"),
+                    value: config.packets_dropped,
+                }),
+            ]
         } else {
-            alloc::vec![0, 0]
+            alloc::vec![
+                TelemetryMetric::Counter(Counter {
+                    name: String::from("packets_forwarded"),
+                    value: 0,
+                }),
+                TelemetryMetric::Counter(Counter {
+                    name: String::from("packets_dropped"),
+                    value: 0,
+                }),
+            ]
         }
     }
 }

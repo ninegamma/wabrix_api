@@ -27,19 +27,10 @@ pub const TIMER_KIND_NONE: u8 = 0;
 pub const TIMER_KIND_TIMEOUT: u8 = 1;
 pub const TIMER_KIND_SYN: u8 = 2;
 
-pub const TELEMETRY_FLAG: u32 = 1 << 8; // Bit 8
-
-/// Marker used by inspector_engine to append its delay histogram to the
-/// existing `get-telemetry() -> list<u64>` payload.
-pub const INSPECTOR_DELAY_HISTOGRAM_MAGIC: u64 = 0x5741_4252_4958_4849;
 /// Histogram resolution and range shared by the inspector plugin and host.
 pub const INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US: u64 = 10;
 pub const INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS: usize = 100;
 pub const INSPECTOR_DELAY_HISTOGRAM_BUCKETS: usize = INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS + 1;
-/// Existing inspector telemetry fields precede the marker and histogram sum.
-pub const INSPECTOR_DELAY_HISTOGRAM_MARKER_INDEX: usize = 5;
-pub const INSPECTOR_DELAY_HISTOGRAM_SUM_INDEX: usize = 6;
-pub const INSPECTOR_DELAY_HISTOGRAM_BUCKETS_INDEX: usize = 7;
 
 /// Strongly typed enum for the reserved standard opcodes (0x0000 - 0x0FFF).
 /// These represent generic system events that any plugin should understand.

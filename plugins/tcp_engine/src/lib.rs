@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use crate::exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
+use crate::exports::wabrix::plugins::packet_engine::{Counter, Guest, TelemetryMetric, TimerPlan};
 use crate::wabrix::plugins::logging;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,6 +23,7 @@ use wabrix_api::tcp_common::{
     PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN,
     STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
     TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX, TCP_ROUTE_TX as ROUTE_TX,
+    TCP_STAT_NAMES,
 };
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -657,7 +658,7 @@ impl Guest for TcpEngine {
             }
         }
     }
-    fn get_telemetry() -> Vec<u64> {
+    fn get_telemetry() -> Vec<TelemetryMetric> {
         let stats = TCP_STATS.borrow();
         let watermark = CONNECTIONS
             .borrow()
@@ -665,6 +666,19 @@ impl Guest for TcpEngine {
             .map(|pool| pool.watermark as u64)
             .unwrap_or(0);
         tcp_telemetry(&stats, watermark)
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                TelemetryMetric::Counter(Counter {
+                    name: if index < TCP_STAT_NAMES.len() {
+                        String::from(TCP_STAT_NAMES[index])
+                    } else {
+                        String::from("watermark")
+                    },
+                    value,
+                })
+            })
+            .collect()
     }
 }
 

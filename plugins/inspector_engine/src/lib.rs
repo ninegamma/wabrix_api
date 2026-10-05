@@ -6,7 +6,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Ref, RefCell, RefMut};
 
-use crate::exports::wabrix::plugins::packet_engine::{Guest, TimerPlan};
+use crate::exports::wabrix::plugins::packet_engine::{
+    Counter, Guest, Histogram, TelemetryMetric, TimerPlan,
+};
 use crate::wabrix::plugins::logging;
 use macaddr::MacAddr6;
 use wabrix_api::helpers::parse_mac;
@@ -14,7 +16,6 @@ use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::{
     HotWasmPayload, PluginOpcode, StandardOpcode, INSPECTOR_DELAY_HISTOGRAM_BUCKETS,
     INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US, INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS,
-    INSPECTOR_DELAY_HISTOGRAM_MAGIC,
 };
 
 wit_bindgen::generate!({
@@ -305,7 +306,7 @@ impl Guest for InspectorEngine {
         }
     }
 
-    fn get_telemetry() -> Vec<u64> {
+    fn get_telemetry() -> Vec<TelemetryMetric> {
         let config = CONFIG.borrow();
         let variance = if config.delay_samples == 0 {
             0.0
@@ -315,18 +316,19 @@ impl Guest for InspectorEngine {
         let average_delay_us = (config.mean_delay_us + 0.5) as u64;
         let standard_deviation_us = (square_root(variance) + 0.5) as u64;
 
-        let mut telemetry = alloc::vec![
-            config.packets_inspected,
-            config.bytes_inspected,
-            config.unexpected,
-            average_delay_us,
-            standard_deviation_us,
-            INSPECTOR_DELAY_HISTOGRAM_MAGIC,
-            config.delay_sum_us,
+        let telemetry = alloc::vec![
+            TelemetryMetric::Counter(Counter { name: String::from("packets_inspected"), value: config.packets_inspected }),
+            TelemetryMetric::Counter(Counter { name: String::from("bytes_inspected"), value: config.bytes_inspected }),
+            TelemetryMetric::Counter(Counter { name: String::from("unexpected"), value: config.unexpected }),
+            TelemetryMetric::Counter(Counter { name: String::from("average_delay_us"), value: average_delay_us }),
+            TelemetryMetric::Counter(Counter { name: String::from("stddev_delay_us"), value: standard_deviation_us }),
+            TelemetryMetric::Hist(Histogram {
+                name: String::from("delay"),
+                sum: config.delay_sum_us,
+                count: config.delay_samples,
+                buckets: config.delay_histogram.to_vec(),
+            }),
         ];
-        // Keep the wire layout explicit: five existing values, the marker,
-        // the exact delay sum in microseconds, then disjoint 10 us bucket counts.
-        telemetry.extend_from_slice(&config.delay_histogram);
         telemetry
     }
 }
