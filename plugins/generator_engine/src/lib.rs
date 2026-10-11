@@ -4,19 +4,24 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::{mem::size_of, ptr};
+use macaddr::MacAddr6;
+use network_types::eth::EtherType;
 
 use crate::exports::wabrix::plugins::packet_engine::{Counter, Guest, TelemetryMetric, TimerPlan};
 use crate::wabrix::plugins::logging;
 use wabrix_api::connections::ConnectionPool;
 use wabrix_api::engine_common::{handle_control_event, ControlResult};
 use wabrix_api::engine_common::{parse_generator_config, SeparatedString, WasmCell, WasmValue};
+use wabrix_api::headers::check::{finalize_checksum, ipv4_checksum};
+use wabrix_api::headers::{IpHeader, MacHeader, UdpHeader};
 use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
 use wabrix_api::{MAX_BATCH_SIZE, TIMER_KIND_TIMEOUT};
 
 use wabrix_api::tcp_common::{
-    write_tcp_packet, write_udp_packet, GeneratorConfig, GeneratorProtocol, PacketGenerator,
-    FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_SENT_SYN,
-    STAT_TICK_DROP, STAT_TO_LINUX, TCP_STAT_NAMES,
+    write_tcp_packet, GeneratorConfig, GeneratorProtocol, PacketGenerator, FLAG_SYN,
+    PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_SENT_SYN, STAT_TICK_DROP,
+    STAT_TO_LINUX, TCP_STAT_NAMES,
 };
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -149,11 +154,7 @@ fn prepare_syn_packet(
 fn prepare_udp_packet(
     packet: &mut MailboxPacket<'_>,
     gen: &mut PacketGenerator,
-    src_mac: [u8; 6],
-    dst_mac: [u8; 6],
-    src_ip: u32,
-    dst_ip: u32,
-    udp_payload: &[u8],
+    template: &UdpPacketTemplate,
 ) {
     gen.packets_sent += 1;
     let src_port = gen.port_counter;
@@ -163,24 +164,101 @@ fn prepare_udp_packet(
         gen.port_counter += 1;
     }
 
-    write_udp_packet(
-        packet.as_packet(),
-        src_mac,
-        dst_mac,
-        src_ip,
-        src_port,
-        dst_ip,
-        80,
-        udp_payload,
-    );
+    template.write(packet, src_port);
+}
+
+/// The UDP payload carries the host TSC snapshot, which is constant during a
+/// batch. Only the source port changes from one generated packet to the next.
+struct UdpPacketTemplate {
+    mac: MacHeader,
+    ip: IpHeader,
+    udp: UdpHeader,
+    payload: [u8; 12],
+    checksum_without_port: u16,
+}
+
+impl UdpPacketTemplate {
+    fn new(config: GeneratorBatchConfig, packet_tsc: u64) -> Self {
+        let mut payload = [0u8; 12];
+        payload[..TIMESTAMP_MAGIC.len()].copy_from_slice(&TIMESTAMP_MAGIC);
+        payload[TIMESTAMP_MAGIC.len()..].copy_from_slice(&packet_tsc.to_be_bytes());
+
+        let mut mac = MacHeader::new();
+        mac.src = MacAddr6::from(config.src_mac);
+        mac.dst = MacAddr6::from(config.dst_mac);
+        mac.set_ethertype(EtherType::Ipv4);
+
+        let mut ip = IpHeader::new();
+        ip.set_src(config.src_ip);
+        ip.set_dst(config.dst_ip);
+        ip.set_ttl(64);
+        ip.set_version(4);
+        ip.set_protocol(17);
+        ip.set_ihl(5);
+        ip.set_length((size_of::<IpHeader>() + size_of::<UdpHeader>() + payload.len()) as u16);
+        ip.set_flags(0x2);
+        ip.update_checksum();
+
+        let mut udp = UdpHeader::new();
+        udp.set_dst_port(80);
+        udp.set_length((size_of::<UdpHeader>() + payload.len()) as u16);
+
+        // Compute the complete checksum with a zero source port once. Adding
+        // the port's 16-bit word below is equivalent to checksumming the full
+        // UDP header and payload again for every packet.
+        let checksum_without_port = ipv4_checksum(
+            (&raw mut udp).cast::<u8>(),
+            size_of::<UdpHeader>(),
+            3,
+            &payload,
+            config.src_ip,
+            config.dst_ip,
+            17,
+        );
+
+        Self {
+            mac,
+            ip,
+            udp,
+            payload,
+            checksum_without_port,
+        }
+    }
+
+    #[inline(always)]
+    fn udp_header_for_port(&self, src_port: u16) -> UdpHeader {
+        let mut udp = self.udp;
+        udp.set_src_port(src_port);
+        udp.set_checksum(finalize_checksum(
+            (!self.checksum_without_port as u32) + src_port as u32,
+        ));
+        udp
+    }
+
+    #[inline(always)]
+    fn write(&self, packet: &mut MailboxPacket<'_>, src_port: u16) {
+        let udp = self.udp_header_for_port(src_port);
+        let packet = packet.as_packet();
+        let header_len = packet.write_mac_ipv4_udp_headers(&self.mac, &self.ip, &udp);
+        // The UMEM frame is exclusively owned and has room for the fixed
+        // 12-byte timestamp payload, as in write_udp_packet.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                self.payload.as_ptr(),
+                packet.data_ptr_mut().add(header_len as usize),
+                self.payload.len(),
+            );
+        }
+        packet.resize_payload(header_len + self.payload.len() as u32);
+    }
 }
 
 #[derive(Clone, Copy)]
 struct GeneratorBatchConfig {
     generation_rate: u64,
     generation_limit: Option<u64>,
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
+    src_ip: u32,
+    dst_ip: u32,
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
     tsc_frequency: u64,
@@ -195,6 +273,14 @@ fn process_batch_for_protocol<const UDP: bool>(
 ) -> u32 {
     let mut batch = MailboxBatch::new(batch_size, umem_offset, mailbox_offset);
     let mut stats = TCP_STATS.borrow_mut();
+    // Keep the generator state borrow across the batch. The state is owned by
+    // this Wasm instance and is only accessed by this process_batch call, so
+    // acquiring the RefCell borrow once avoids one borrow pair per packet.
+    let mut gen = PACKET_GEN.borrow_mut();
+    // The host TSC snapshot is updated by process_timers between batch calls,
+    // so every packet in this batch shares the same timestamp.
+    let packet_tsc = CURRENT_TSC.get();
+    let udp_template = UDP.then(|| UdpPacketTemplate::new(config, packet_tsc));
 
     for mut packet in batch.iter_mut() {
         let action = match packet.tick_kind() {
@@ -210,8 +296,6 @@ fn process_batch_for_protocol<const UDP: bool>(
                 ROUTE_DROP
             }
             Some(_) => {
-                let mut gen = PACKET_GEN.borrow_mut();
-
                 // Evaluate generation limits idiomatically
                 let under_limit = config
                     .generation_limit
@@ -223,39 +307,22 @@ fn process_batch_for_protocol<const UDP: bool>(
                     ROUTE_DROP
                 } else {
                     // Generate and track the packet
-                    let packet_start_tsc = CURRENT_TSC.get();
-                    let src_ip = u32::from_be_bytes(config.src_ip);
-                    let dst_ip = u32::from_be_bytes(config.dst_ip);
+                    let packet_start_tsc = packet_tsc;
 
                     // `packet_start_tsc` originates from the host's actual
                     // `_rdtsc()` value passed through process_timers().
                     packet.as_packet().set_timestamp(packet_start_tsc);
 
                     if UDP {
-                        // Prefix the timestamp so the inspector can reject
-                        // unrelated UDP payloads without per-packet allocation.
-                        let mut udp_payload =
-                            [0u8; TIMESTAMP_MAGIC.len() + core::mem::size_of::<u64>()];
-                        udp_payload[..TIMESTAMP_MAGIC.len()].copy_from_slice(&TIMESTAMP_MAGIC);
-                        udp_payload[TIMESTAMP_MAGIC.len()..]
-                            .copy_from_slice(&packet_start_tsc.to_be_bytes());
-                        prepare_udp_packet(
-                            &mut packet,
-                            &mut gen,
-                            config.src_mac,
-                            config.dst_mac,
-                            src_ip,
-                            dst_ip,
-                            &udp_payload,
-                        );
+                        prepare_udp_packet(&mut packet, &mut gen, udp_template.as_ref().unwrap());
                     } else {
                         prepare_syn_packet(
                             &mut packet,
                             &mut gen,
                             config.src_mac,
                             config.dst_mac,
-                            src_ip,
-                            dst_ip,
+                            config.src_ip,
+                            config.dst_ip,
                         );
                     }
 
@@ -263,7 +330,7 @@ fn process_batch_for_protocol<const UDP: bool>(
                         GENERATION_START_TSC.set(packet_start_tsc);
                     }
 
-                    let packet_end_tsc = CURRENT_TSC.get();
+                    let packet_end_tsc = packet_tsc;
                     let generation_complete = config
                         .generation_limit
                         .is_some_and(|limit| limit > 0 && gen.packets_sent == limit);
@@ -368,7 +435,6 @@ impl Guest for GeneratorEngine {
     }
 
     fn process_batch(batch_size: u32, umem_offset: u32, mailbox_offset: u32) -> u32 {
-
         let config_guard = CONFIG.borrow();
         let Some(config) = config_guard.as_ref() else {
             // init_data is required to succeed before process_batch is called.
@@ -385,25 +451,19 @@ impl Guest for GeneratorEngine {
         let config = GeneratorBatchConfig {
             generation_rate: config.generation_rate.unwrap_or(0),
             generation_limit: config.generation_limit,
-            src_ip: config.src_ip.unwrap_or([0; 4]),
-            dst_ip: config.dst_ip.unwrap_or([0; 4]),
+            src_ip: u32::from_be_bytes(config.src_ip.unwrap_or([0; 4])),
+            dst_ip: u32::from_be_bytes(config.dst_ip.unwrap_or([0; 4])),
             src_mac: config.src_mac.unwrap_or([0; 6]),
             dst_mac: config.dst_mac.unwrap_or([0xff; 6]),
             tsc_frequency: config.tsc_frequency,
         };
         match protocol {
-            GeneratorProtocol::Syn => process_batch_for_protocol::<false>(
-                batch_size,
-                umem_offset,
-                mailbox_offset,
-                config,
-            ),
-            GeneratorProtocol::Udp => process_batch_for_protocol::<true>(
-                batch_size,
-                umem_offset,
-                mailbox_offset,
-                config,
-            ),
+            GeneratorProtocol::Syn => {
+                process_batch_for_protocol::<false>(batch_size, umem_offset, mailbox_offset, config)
+            }
+            GeneratorProtocol::Udp => {
+                process_batch_for_protocol::<true>(batch_size, umem_offset, mailbox_offset, config)
+            }
         }
     }
 
@@ -490,11 +550,8 @@ impl Guest for GeneratorEngine {
                         .saturating_add(available_frames),
                 );
                 #[cfg(feature = "runtime-diagnostics")]
-                TIMER_MAX_AVAILABLE_FRAMES.set(
-                    TIMER_MAX_AVAILABLE_FRAMES
-                        .get()
-                        .max(available_frames),
-                );
+                TIMER_MAX_AVAILABLE_FRAMES
+                    .set(TIMER_MAX_AVAILABLE_FRAMES.get().max(available_frames));
 
                 // Apply generation limits and cap at the configured node batch size.
                 let allowed_frames = match limit {
@@ -521,11 +578,7 @@ impl Guest for GeneratorEngine {
 
                 #[cfg(feature = "runtime-diagnostics")]
                 if available_frames > CONFIGURED_BATCH_SIZE.get() as u64 {
-                    TIMER_CAP_EXCEEDED_CALLS.set(
-                        TIMER_CAP_EXCEEDED_CALLS
-                            .get()
-                            .saturating_add(1),
-                    );
+                    TIMER_CAP_EXCEEDED_CALLS.set(TIMER_CAP_EXCEEDED_CALLS.get().saturating_add(1));
                     TIMER_FRAMES_HELD_BY_CAP.set(
                         TIMER_FRAMES_HELD_BY_CAP
                             .get()
@@ -653,6 +706,64 @@ fn flush_state(mode: u8) {
     *TCP_STATS.borrow_mut() = [0; STAT_COUNT];
 
     log::trace!("TCP Engine state flushed (mode: {})", mode);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_template_matches_full_packet_checksum() {
+        let config = GeneratorBatchConfig {
+            generation_rate: 1,
+            generation_limit: None,
+            src_ip: 0x0a0a0ade,
+            dst_ip: 0x0a0a0a1f,
+            src_mac: [0x44, 0x49, 0x88, 0x06, 0x63, 0x38],
+            dst_mac: [0x44, 0x49, 0x88, 0x06, 0x63, 0x39],
+            tsc_frequency: 3_417_600_000,
+        };
+
+        for timestamp in [0, 1, 0x1234_5678_9abc_def0, u64::MAX] {
+            let template = UdpPacketTemplate::new(config, timestamp);
+            assert_eq!(&template.payload[..4], &TIMESTAMP_MAGIC);
+            assert_eq!(&template.payload[4..], &timestamp.to_be_bytes());
+
+            for port in [
+                0,
+                1,
+                PORT_START_RANGE,
+                32_768,
+                template.checksum_without_port,
+                PORT_END_RANGE,
+            ] {
+                let udp = template.udp_header_for_port(port);
+                let mut full_datagram = [0u8; size_of::<UdpHeader>() + 12];
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        (&raw const udp).cast::<u8>(),
+                        full_datagram.as_mut_ptr(),
+                        size_of::<UdpHeader>(),
+                    );
+                }
+                full_datagram[size_of::<UdpHeader>()..].copy_from_slice(&template.payload);
+                let expected = ipv4_checksum(
+                    full_datagram.as_mut_ptr(),
+                    full_datagram.len(),
+                    3,
+                    &[],
+                    config.src_ip,
+                    config.dst_ip,
+                    17,
+                );
+                assert_eq!(
+                    udp.checksum(),
+                    expected,
+                    "timestamp={timestamp} port={port}"
+                );
+            }
+        }
+    }
 }
 
 // Export the implementation to the runtime
