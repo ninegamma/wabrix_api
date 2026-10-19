@@ -13,7 +13,7 @@ impl WPdu {
         desc_addr: u64,
         desc_len: u32,
         desc_options: u32,
-        global_frame_idx: u32,
+        frame_token: u32,
         frame_size_log2: u8,
         owner_id: u8,
     ) -> WPdu {
@@ -22,7 +22,7 @@ impl WPdu {
             desc_addr,
             desc_len,
             desc_options,
-            global_frame_idx,
+            frame_token,
             frame_size_log2,
             owner_id,
             ..Default::default()
@@ -37,7 +37,7 @@ impl Default for WPdu {
             desc_addr: 0,
             desc_len: 0,
             desc_options: 0,
-            global_frame_idx: 0,
+            frame_token: 0,
             frame_size_log2: 11, // 2^11 = 2048 (common default frame size)
             owner_id: 0,
             flags: 0,
@@ -74,14 +74,14 @@ impl WPdu {
     }
 
     #[inline]
-    pub fn global_frame_idx(&self) -> u32 {
-        self.global_frame_idx
+    pub fn frame_token(&self) -> u32 {
+        self.frame_token
     }
 
     /// Returns the 8 bit partition ID carried by the frame token.
     #[inline]
     pub fn partition_id(&self) -> u8 {
-        ((self.global_frame_idx >> 23) & 0xff) as u8
+        ((self.frame_token >> 23) & 0xff) as u8
     }
 
     #[inline]

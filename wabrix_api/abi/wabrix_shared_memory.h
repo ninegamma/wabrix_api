@@ -38,7 +38,7 @@ typedef struct wabrix_wpdu {
     uint64_t desc_addr;
     uint32_t desc_len;
     uint32_t desc_options;
-    uint32_t global_frame_idx;
+    uint32_t frame_token;
     uint8_t frame_size_log2;
     uint8_t owner_id;
     uint8_t flags;
@@ -75,7 +75,7 @@ WABRIX_STATIC_ASSERT(wpdu_header_stack, offsetof(wabrix_wpdu_t, header_stack) ==
 WABRIX_STATIC_ASSERT(wpdu_desc_addr, offsetof(wabrix_wpdu_t, desc_addr) == 16);
 WABRIX_STATIC_ASSERT(wpdu_desc_len, offsetof(wabrix_wpdu_t, desc_len) == 24);
 WABRIX_STATIC_ASSERT(wpdu_desc_options, offsetof(wabrix_wpdu_t, desc_options) == 28);
-WABRIX_STATIC_ASSERT(wpdu_global_frame_idx, offsetof(wabrix_wpdu_t, global_frame_idx) == 32);
+WABRIX_STATIC_ASSERT(wpdu_frame_token, offsetof(wabrix_wpdu_t, frame_token) == 32);
 WABRIX_STATIC_ASSERT(wpdu_frame_size_log2, offsetof(wabrix_wpdu_t, frame_size_log2) == 36);
 WABRIX_STATIC_ASSERT(wpdu_owner_id, offsetof(wabrix_wpdu_t, owner_id) == 37);
 WABRIX_STATIC_ASSERT(wpdu_flags, offsetof(wabrix_wpdu_t, flags) == 38);
