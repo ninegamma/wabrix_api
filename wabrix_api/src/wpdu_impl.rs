@@ -78,9 +78,10 @@ impl WPdu {
         self.global_frame_idx
     }
 
+    /// Returns the 8 bit partition ID carried by the frame token.
     #[inline]
-    pub fn umem_id(&self) -> u8 {
-        (self.global_frame_idx >> 24) as u8
+    pub fn partition_id(&self) -> u8 {
+        ((self.global_frame_idx >> 23) & 0xff) as u8
     }
 
     #[inline]

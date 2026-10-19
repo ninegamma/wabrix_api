@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+mod diagnostics;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::{mem::size_of, ptr};
@@ -12,7 +14,7 @@ use crate::exports::wabrix::plugins::packet_engine::{Counter, Guest, TelemetryMe
 use crate::wabrix::plugins::logging;
 use wabrix_api::connections::ConnectionPool;
 use wabrix_api::engine_common::{handle_control_event, ControlResult};
-use wabrix_api::engine_common::{parse_generator_config, SeparatedString, WasmCell, WasmValue};
+use wabrix_api::engine_common::{parse_generator_config, WasmCell, WasmValue};
 use wabrix_api::headers::check::{finalize_checksum, ipv4_checksum};
 use wabrix_api::headers::{IpHeader, MacHeader, UdpHeader};
 use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
@@ -48,31 +50,6 @@ static CURRENT_TSC: WasmValue<u64> = WasmValue::new(0);
 static RUN_START_TSC: WasmValue<u64> = WasmValue::new(0);
 static GENERATION_START_TSC: WasmValue<u64> = WasmValue::new(0);
 static CONFIGURED_BATCH_SIZE: WasmValue<u32> = WasmValue::new(MAX_BATCH_SIZE as u32);
-#[cfg(feature = "runtime-diagnostics")]
-static PROCESS_TIMERS_CALLS: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_CYCLES_CREDITED: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_FRAMES_REQUESTED: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static FIRST_TIMER_TSC: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static LAST_TIMER_TSC: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_AVAILABLE_FRAMES_TOTAL: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_CAP_EXCEEDED_CALLS: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_MAX_AVAILABLE_FRAMES: WasmValue<u64> = WasmValue::new(0);
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_FRAMES_HELD_BY_CAP: WasmValue<u64> = WasmValue::new(0);
-// Availability buckets: 0, 1..511, 512..1023, 1024..4095,
-// 4096..65535, and 65536+ frames.
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_AVAILABLE_HISTOGRAM: WasmCell<[u64; 6]> = WasmCell::new([0; 6]);
-// Final batch buckets: zero, below the configured cap, and exactly at the cap.
-#[cfg(feature = "runtime-diagnostics")]
-static TIMER_FINAL_FRAMES_HISTOGRAM: WasmCell<[u64; 3]> = WasmCell::new([0; 3]);
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
@@ -350,31 +327,11 @@ fn process_batch_for_protocol<const UDP: bool>(
                             .checked_div(elapsed_micros)
                             .unwrap_or(0);
 
-                        #[cfg(feature = "runtime-diagnostics")]
-                        log::info!(
-                            "generation run complete: packets={}, elapsed={}us, speed={} packets/s, process_timers_calls={}, timer_cycles_credited={}, timer_frames_requested={}, timer_available_frames_total={}, timer_cap_exceeded_calls={}, timer_max_available_frames={}, timer_frames_held_by_cap={}, available_frames_histogram={:?}, final_frames_histogram={:?}, first_timer_tsc={}, last_timer_tsc={}, final_cycle_accumulator={}",
-                            packets.separated_string(),
-                            elapsed_micros.separated_string(),
-                            packets_per_second.separated_string(),
-                            PROCESS_TIMERS_CALLS.get().separated_string(),
-                            TIMER_CYCLES_CREDITED.get().separated_string(),
-                            TIMER_FRAMES_REQUESTED.get().separated_string(),
-                            TIMER_AVAILABLE_FRAMES_TOTAL.get().separated_string(),
-                            TIMER_CAP_EXCEEDED_CALLS.get().separated_string(),
-                            TIMER_MAX_AVAILABLE_FRAMES.get().separated_string(),
-                            TIMER_FRAMES_HELD_BY_CAP.get().separated_string(),
-                            *TIMER_AVAILABLE_HISTOGRAM.borrow(),
-                            *TIMER_FINAL_FRAMES_HISTOGRAM.borrow(),
-                            FIRST_TIMER_TSC.get().separated_string(),
-                            LAST_TIMER_TSC.get().separated_string(),
-                            gen.cycle_accumulator.separated_string()
-                        );
-                        #[cfg(not(feature = "runtime-diagnostics"))]
-                        log::info!(
-                            "generation run complete: packets={}, elapsed={}us, speed={} packets/s",
-                            packets.separated_string(),
-                            elapsed_micros.separated_string(),
-                            packets_per_second.separated_string()
+                        diagnostics::report_generation_complete(
+                            packets,
+                            elapsed_micros,
+                            packets_per_second,
+                            gen.cycle_accumulator,
                         );
                     }
 
@@ -470,14 +427,7 @@ impl Guest for GeneratorEngine {
     fn process_timers(current_tsc: u64) -> TimerPlan {
         // Global state updates remain imperative but concise
         CURRENT_TSC.set(current_tsc);
-        #[cfg(feature = "runtime-diagnostics")]
-        PROCESS_TIMERS_CALLS.set(PROCESS_TIMERS_CALLS.get().saturating_add(1));
-        #[cfg(feature = "runtime-diagnostics")]
-        if FIRST_TIMER_TSC.get() == 0 {
-            FIRST_TIMER_TSC.set(current_tsc);
-        }
-        #[cfg(feature = "runtime-diagnostics")]
-        LAST_TIMER_TSC.set(current_tsc);
+        diagnostics::record_timer_poll(current_tsc);
         if RUN_START_TSC.get() == 0 {
             RUN_START_TSC.set(current_tsc);
         }
@@ -520,38 +470,11 @@ impl Guest for GeneratorEngine {
                 gen.cycle_accumulator = gen
                     .cycle_accumulator
                     .saturating_add(delta_tsc.saturating_mul(rate));
-                #[cfg(feature = "runtime-diagnostics")]
-                TIMER_CYCLES_CREDITED.set(
-                    TIMER_CYCLES_CREDITED
-                        .get()
-                        .saturating_add(delta_tsc.saturating_mul(rate)),
-                );
+                diagnostics::record_cycle_credit(delta_tsc.saturating_mul(rate));
 
                 // Calculate how many frames the cycles allow
                 let available_frames = gen.cycle_accumulator / tsc_freq;
-                #[cfg(feature = "runtime-diagnostics")]
-                let available_bucket = match available_frames {
-                    0 => 0,
-                    1..=511 => 1,
-                    512..=1023 => 2,
-                    1024..=4095 => 3,
-                    4096..=65_535 => 4,
-                    _ => 5,
-                };
-                #[cfg(feature = "runtime-diagnostics")]
-                {
-                    let mut histogram = TIMER_AVAILABLE_HISTOGRAM.borrow_mut();
-                    histogram[available_bucket] = histogram[available_bucket].saturating_add(1);
-                }
-                #[cfg(feature = "runtime-diagnostics")]
-                TIMER_AVAILABLE_FRAMES_TOTAL.set(
-                    TIMER_AVAILABLE_FRAMES_TOTAL
-                        .get()
-                        .saturating_add(available_frames),
-                );
-                #[cfg(feature = "runtime-diagnostics")]
-                TIMER_MAX_AVAILABLE_FRAMES
-                    .set(TIMER_MAX_AVAILABLE_FRAMES.get().max(available_frames));
+                diagnostics::record_available_frames(available_frames);
 
                 // Apply generation limits and cap at the configured node batch size.
                 let allowed_frames = match limit {
@@ -562,41 +485,19 @@ impl Guest for GeneratorEngine {
                 };
 
                 let final_frames = (allowed_frames as u32).min(CONFIGURED_BATCH_SIZE.get());
-                #[cfg(feature = "runtime-diagnostics")]
-                let final_bucket = if final_frames == 0 {
-                    0
-                } else if final_frames < CONFIGURED_BATCH_SIZE.get() {
-                    1
-                } else {
-                    2
-                };
-                #[cfg(feature = "runtime-diagnostics")]
-                {
-                    let mut histogram = TIMER_FINAL_FRAMES_HISTOGRAM.borrow_mut();
-                    histogram[final_bucket] = histogram[final_bucket].saturating_add(1);
-                }
-
-                #[cfg(feature = "runtime-diagnostics")]
-                if available_frames > CONFIGURED_BATCH_SIZE.get() as u64 {
-                    TIMER_CAP_EXCEEDED_CALLS.set(TIMER_CAP_EXCEEDED_CALLS.get().saturating_add(1));
-                    TIMER_FRAMES_HELD_BY_CAP.set(
-                        TIMER_FRAMES_HELD_BY_CAP
-                            .get()
-                            .saturating_add(allowed_frames.saturating_sub(final_frames as u64)),
-                    );
-                }
+                diagnostics::record_final_frames(
+                    available_frames,
+                    allowed_frames,
+                    final_frames,
+                    CONFIGURED_BATCH_SIZE.get(),
+                );
 
                 // Deduct consumed cycles immediately
                 if final_frames > 0 {
                     gen.cycle_accumulator = gen
                         .cycle_accumulator
                         .saturating_sub((final_frames as u64).saturating_mul(tsc_freq));
-                    #[cfg(feature = "runtime-diagnostics")]
-                    TIMER_FRAMES_REQUESTED.set(
-                        TIMER_FRAMES_REQUESTED
-                            .get()
-                            .saturating_add(final_frames as u64),
-                    );
+                    diagnostics::record_requested_frames(final_frames);
                 }
 
                 final_frames

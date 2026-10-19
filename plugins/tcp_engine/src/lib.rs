@@ -10,13 +10,9 @@ use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
 use wabrix_api::engine_common::{
     handle_control_event, parse_tcp_engine_config, ControlResult, WasmCell, WasmValue,
 };
+use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::packet::Packet;
-use wabrix_api::{
-    HotWasmPayload, PluginOpcode, StandardOpcode, MAX_BATCH_SIZE, TIMER_KIND_NONE,
-    TIMER_KIND_TIMEOUT,
-};
-use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::tcp_common::{
     run_tcp_state_machine, tcp_telemetry, write_tcp_packet, EngineTimerPlan, PacketGenerator,
     TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE,
@@ -24,6 +20,10 @@ use wabrix_api::tcp_common::{
     STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
     TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX, TCP_ROUTE_TX as ROUTE_TX,
     TCP_STAT_NAMES,
+};
+use wabrix_api::{
+    HotWasmPayload, PluginOpcode, StandardOpcode, MAX_BATCH_SIZE, TIMER_KIND_NONE,
+    TIMER_KIND_TIMEOUT,
 };
 
 // 1. Tell the macro to read the .wit file and generate the bindings
@@ -206,7 +206,7 @@ impl Guest for TcpEngine {
         // Pre-calculate integer IP representations once per batch
         let base_src_ip = u32::from_be_bytes(local_config.src_ip.unwrap_or([0, 0, 0, 0]));
         let base_dst_ip = u32::from_be_bytes(local_config.dst_ip.unwrap_or([0, 0, 0, 0]));
-        let syn_rate = local_config.syn_rate.unwrap_or(0);
+        let generation_rate = local_config.generation_rate.unwrap_or(0);
 
         for mut packet in batch.iter_mut() {
             let tick_kind = packet.tick_kind();
@@ -285,7 +285,7 @@ impl Guest for TcpEngine {
                 // PRIORITY 2: Generate new SYNs
                 if !generated_reply && timer_kind != TIMER_KIND_TIMEOUT {
                     log::trace!("process_batch: generating new SYN");
-                    if syn_rate > 0 {
+                    if generation_rate > 0 {
                         let mut gen = SYN_GEN.borrow_mut();
                         let allowed_to_send = gen.activated
                             && match local_config.syn_limit {
@@ -429,11 +429,11 @@ impl Guest for TcpEngine {
         // =================================================================
         // 2. SYN GENERATOR
         // =================================================================
-        let syn_rate = config.syn_rate.unwrap_or(0);
+        let generation_rate = config.generation_rate.unwrap_or(0);
         let mut syn_delta_tsc = 0;
         let mut desired_syn_frames = 0;
         let mut syn_accumulator = 0;
-        if syn_rate > 0 {
+        if generation_rate > 0 {
             let mut gen = SYN_GEN.borrow_mut();
 
             let allowed_to_send = gen.activated
@@ -452,7 +452,7 @@ impl Guest for TcpEngine {
 
                 gen.cycle_accumulator = gen
                     .cycle_accumulator
-                    .saturating_add(delta_tsc.saturating_mul(syn_rate));
+                    .saturating_add(delta_tsc.saturating_mul(generation_rate));
                 let mut syn_frames = (gen.cycle_accumulator / tsc_freq) as u32;
 
                 if let Some(max_syns) = config.syn_limit {
@@ -496,7 +496,7 @@ impl Guest for TcpEngine {
                 (timeout_frames, syn_frames)
             };
 
-        if syn_rate > 0 {
+        if generation_rate > 0 {
             let mut gen = SYN_GEN.borrow_mut();
             gen.cycle_accumulator = gen
                 .cycle_accumulator
@@ -505,7 +505,7 @@ impl Guest for TcpEngine {
         }
 
         let frames_to_request = timeout_frames + packet_frames;
-        let potential_log = syn_rate > 0
+        let potential_log = generation_rate > 0
             && ((pending_timeout_frames > (20 * MAX_BATCH_SIZE) as u32)
                 || (packet_frames >= desired_syn_frames));
 
@@ -587,12 +587,12 @@ impl Guest for TcpEngine {
             PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
                 if let Ok(data) = postcard::from_bytes::<HotWasmPayload>(&payload) {
                     // Parse phase: validate all inputs before mutating state to ensure atomic updates
-                    let parsed_syn_rate = match data.updates.get("syn_rate") {
+                    let parsed_generation_rate = match data.updates.get("generation_rate") {
                         Some(s) if s.is_empty() => Some(None),
                         Some(s) => match parse_suffixed_number(s) {
                             Ok(val) => Some(Some(val)),
                             Err(_) => {
-                                log::warn!("UpdateConfiguration failed: invalid syn_rate");
+                                log::warn!("UpdateConfiguration failed: invalid generation_rate");
                                 return false;
                             }
                         },
@@ -626,10 +626,10 @@ impl Guest for TcpEngine {
                     // Apply phase: compare against current state to prevent redundant updates and logs
                     let mut guard = CONFIG.borrow_mut();
                     if let Some(ref mut config) = *guard {
-                        if let Some(new_val) = parsed_syn_rate {
-                            if config.syn_rate != new_val {
-                                config.syn_rate = new_val;
-                                log::info!("UpdateConfiguration: syn_rate updated");
+                        if let Some(new_val) = parsed_generation_rate {
+                            if config.generation_rate != new_val {
+                                config.generation_rate = new_val;
+                                log::info!("UpdateConfiguration: generation_rate updated");
                             }
                         }
                         if let Some(new_val) = parsed_syn_limit {

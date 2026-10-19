@@ -35,7 +35,8 @@ pub struct WPdu {
     pub desc_len: u32,
     /// AF_XDP descriptor options.
     pub desc_options: u32,
-    /// Global frame identity, including the UMEM identifier.
+    /// Global frame token: partition ID plus partition-relative offset; bit 31 is
+    /// reserved for retain/release commands when transported through a return queue.
     pub(crate) global_frame_idx: u32,
     /// Base-2 logarithm of the frame size.
     pub frame_size_log2: u8,

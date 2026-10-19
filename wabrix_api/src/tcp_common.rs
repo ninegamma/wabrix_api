@@ -199,7 +199,7 @@ pub struct CommonEngineConfig {
 #[derive(Clone, Default)]
 pub struct TcpEngineConfig {
     pub common: CommonEngineConfig,
-    pub syn_rate: Option<u64>,
+    pub generation_rate: Option<u64>,
     pub syn_limit: Option<u64>,
     pub close_timeout_millis: Option<u64>,
     /// Timeout converted to TSC cycles during configuration, not on the timer hot path.

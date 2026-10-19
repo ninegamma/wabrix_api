@@ -146,10 +146,10 @@ pub fn parse_tcp_engine_config(
                     return Err(format!("invalid rng_seed: {}", value));
                 }
             }
-            "syn_rate" => {
-                config.syn_rate = parse_suffixed_number(&value).ok();
-                if config.syn_rate.is_none() {
-                    return Err(format!("invalid syn_rate: {}", value));
+            "generation_rate" => {
+                config.generation_rate = parse_suffixed_number(&value).ok();
+                if config.generation_rate.is_none() {
+                    return Err(format!("invalid generation_rate: {}", value));
                 }
             }
             "syn_limit" => {
@@ -177,8 +177,10 @@ pub fn parse_tcp_engine_config(
     if config.dst_mac.is_none() {
         return Err(String::from("missing required dst_mac"));
     }
-    if config.syn_rate.is_some_and(|rate| rate > 0) && config.dst_ip.is_none() {
-        return Err(String::from("dst_ip is required when syn_rate is positive"));
+    if config.generation_rate.is_some_and(|rate| rate > 0) && config.dst_ip.is_none() {
+        return Err(String::from(
+            "dst_ip is required when generation_rate is positive",
+        ));
     }
 
     config.refresh_timeout_cycles();
@@ -210,7 +212,7 @@ impl EngineConfigModel for TcpEngineConfig {
     }
 
     fn apply_updates(&mut self, updates: &HashMap<String, String>) -> bool {
-        let Ok(syn_rate) = parse_update_number(updates, "syn_rate") else {
+        let Ok(generation_rate) = parse_update_number(updates, "generation_rate") else {
             return false;
         };
         let Ok(syn_limit) = parse_update_number(updates, "syn_limit") else {
@@ -225,8 +227,8 @@ impl EngineConfigModel for TcpEngineConfig {
             None => None,
         };
 
-        if let Some(value) = syn_rate {
-            self.syn_rate = value;
+        if let Some(value) = generation_rate {
+            self.generation_rate = value;
         }
         if let Some(value) = syn_limit {
             self.syn_limit = value;
@@ -263,11 +265,7 @@ impl EngineConfigModel for GeneratorConfig {
     }
 
     fn apply_updates(&mut self, updates: &HashMap<String, String>) -> bool {
-        let rate_key = if updates.contains_key("generation_rate") {
-            "generation_rate"
-        } else {
-            "syn_rate"
-        };
+        let rate_key = "generation_rate";
         let limit_key = if updates.contains_key("generation_limit") {
             "generation_limit"
         } else {
@@ -428,7 +426,7 @@ pub fn parse_generator_config(
                 config.rng_seed = value.parse::<u32>().ok();
                 config.rng_seed.as_ref()?;
             }
-            "generation_rate" | "syn_rate" => {
+            "generation_rate" => {
                 config.generation_rate = parse_suffixed_number(&value).ok();
                 config.generation_rate.as_ref()?;
             }
@@ -479,7 +477,7 @@ mod tests {
             ("dst_mac".into(), "66:77:88:99:aa:bb".into()),
             ("src_ip".into(), "10.0.0.1".into()),
             ("dst_ip".into(), "10.0.0.2".into()),
-            ("syn_rate".into(), "1.5k".into()),
+            ("generation_rate".into(), "1.5k".into()),
             ("syn_limit".into(), "10k".into()),
             ("close_timeout".into(), "80".into()),
         ]
@@ -491,7 +489,7 @@ mod tests {
             .expect("valid TCP configuration should parse");
 
         assert_eq!(name, "client");
-        assert_eq!(config.syn_rate, Some(1_500));
+        assert_eq!(config.generation_rate, Some(1_500));
         assert_eq!(config.syn_limit, Some(10_000));
         assert_eq!(config.close_timeout_millis, Some(80));
         assert_eq!(config.timeout_cycles, Some(240));
@@ -500,7 +498,7 @@ mod tests {
     #[test]
     fn rejects_invalid_values_and_missing_required_fields() {
         let mut invalid = valid_client_data();
-        invalid.push(("syn_rate".into(), "not-a-rate".into()));
+        invalid.push(("generation_rate".into(), "not-a-rate".into()));
         assert!(parse_tcp_engine_config(invalid, 3_000).is_err());
 
         let server = vec![
@@ -520,7 +518,7 @@ mod tests {
             .expect("valid TCP configuration should parse");
         let payload = postcard::to_allocvec(&HotWasmPayload {
             updates: [
-                ("syn_rate".into(), "2M".into()),
+                ("generation_rate".into(), "2M".into()),
                 ("close_timeout".into(), "120".into()),
             ]
             .into_iter()
@@ -529,13 +527,13 @@ mod tests {
         .expect("payload should serialize");
 
         apply_tcp_configuration_update(&payload, &mut config).expect("valid update should apply");
-        assert_eq!(config.syn_rate, Some(2_000_000));
+        assert_eq!(config.generation_rate, Some(2_000_000));
         assert_eq!(config.close_timeout_millis, Some(120));
         assert_eq!(config.timeout_cycles, Some(360));
 
         let invalid_payload = postcard::to_allocvec(&HotWasmPayload {
             updates: [
-                ("syn_rate".into(), "3M".into()),
+                ("generation_rate".into(), "3M".into()),
                 ("close_timeout".into(), "invalid".into()),
             ]
             .into_iter()
@@ -544,7 +542,7 @@ mod tests {
         .expect("payload should serialize");
 
         assert!(apply_tcp_configuration_update(&invalid_payload, &mut config).is_err());
-        assert_eq!(config.syn_rate, Some(2_000_000));
+        assert_eq!(config.generation_rate, Some(2_000_000));
         assert_eq!(config.close_timeout_millis, Some(120));
     }
 
