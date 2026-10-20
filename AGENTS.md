@@ -30,7 +30,7 @@ wabrix_api/
 │   ├── tcp_engine/            # Example engine plugin: implements the packet-engine WIT interface
 │   └── generator_plugin/      # Example generator plugin: implements the generator WIT interface
 └── wit/
-    └── xbricks.wit            # WIT interface definitions (inspector, packet-engine, generator, logging)
+    └── wabrix.wit            # WIT interface definitions (inspector, packet-engine, generator, logging)
 ```
 
 ### Crate responsibilities & allowed dependencies
@@ -47,7 +47,7 @@ wabrix_api/
 
 | File | Contains |
 |---|---|
-| `wit/xbricks.wit` | WIT interface definitions: `inspector`, `packet-engine`, `generator`, `logging`; three worlds: `filter-plugin`, `generator-plugin`, `engine-plugin` |
+| `wit/wabrix.wit` | WIT interface definitions: `inspector`, `packet-engine`, `generator`, `logging`; three worlds: `filter-plugin`, `generator-plugin`, `engine-plugin` |
 | `wabrix_api/src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations |
 | `wabrix_api/src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `Pdu0` + UMEM base address; primary plugin-facing API |
 | `wabrix_api/src/hstack.rs` | `HeaderStack` — fixed-capacity (5 slots) parsed header descriptor; exactly 16 bytes |
@@ -70,7 +70,7 @@ wabrix_api/
 * **FORBIDDEN:** Do NOT use `std::net`, OS threads, file I/O, or any syscall that is not available in the WASI Component Model sandbox.
 
 ### WIT Interface Standard
-* **Bindgen:** `wit-bindgen` generates WASM guest bindings from `wit/xbricks.wit`. Import it at the top of each plugin's `lib.rs` via `wit_bindgen::generate!`.
+* **Bindgen:** `wit-bindgen` generates WASM guest bindings from `wit/wabrix.wit`. Import it at the top of each plugin's `lib.rs` via `wit_bindgen::generate!`.
 * **Interface selection:** Implement exactly the WIT world that matches the plugin type (`filter-plugin`, `generator-plugin`, or `engine-plugin`). Do not mix world exports.
 * The `.wit` file is the source of truth for the host/plugin ABI. Never hand-code the ABI.
 
@@ -124,7 +124,7 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 
 ## 5. Plugin API Quick Reference
 
-> Full WIT definition: `wit/xbricks.wit`
+> Full WIT definition: `wit/wabrix.wit`
 
 * **`inspect-batch(batch_bytes, umem_offset) -> list<u32>`** — called on each burst for `filter-plugin` and `inspector` nodes. `umem_offset` is the positive Wasm-linear offset where the shared UMEM begins. Each `u32` in the return list is a routing action for the corresponding PDU: lower 8 bits = route ID, bit 8 = `TELEMETRY_FLAG`.
 * **`process-batch(batch_bytes, umem_offset) -> (list<u32>, list<u32>)`** — called on each burst for `engine-plugin` nodes. `umem_offset` is the positive Wasm-linear offset where the shared UMEM begins. Returns routing actions (same encoding as above) plus new packet lengths (for plugins that modify packet size).
@@ -172,5 +172,5 @@ cargo test
 1. **Expert Systems Tone:** Do not explain basic Rust concepts (ownership, borrower checker, lifetimes). Assume the reader is a senior systems engineer fluent in Rust, Linux networking internals, and the WebAssembly Component Model.
 2. **Hot-Path Change Rationale:** When suggesting modifications in batch callbacks, explicitly comment *why* the change avoids allocations, reduces branch mispredictions, or saves CPU cycles inside the WASM sandbox.
 3. **Minimal Diffs:** When asked to fix a function, output only the relevant function or module diff — not the entire file.
-4. **WIT Compatibility:** Before suggesting a new function or type, verify it is expressible in the current WIT type system. Do not silently introduce ABI-breaking changes to `xbricks.wit`.
+4. **WIT Compatibility:** Before suggesting a new function or type, verify it is expressible in the current WIT type system. Do not silently introduce ABI-breaking changes to `wabrix.wit`.
 5. **No Silent Drops:** Never suggest code that discards a PDU routing result without either returning a drop action (0) or setting `TELEMETRY_FLAG` and accounting for it in a counter.

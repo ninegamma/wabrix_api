@@ -13,18 +13,18 @@ impl WPdu {
         desc_addr: u64,
         desc_len: u32,
         desc_options: u32,
-        frame_token: u32,
+        umem_group_id: u32,
         frame_size_log2: u8,
-        owner_id: u8,
+        worker_id: u8,
     ) -> WPdu {
         WPdu {
             header_stack: HeaderStack::new(),
             desc_addr,
             desc_len,
             desc_options,
-            frame_token,
+            umem_group_id,
             frame_size_log2,
-            owner_id,
+            worker_id,
             ..Default::default()
         }
     }
@@ -37,9 +37,9 @@ impl Default for WPdu {
             desc_addr: 0,
             desc_len: 0,
             desc_options: 0,
-            frame_token: 0,
+            umem_group_id: 0,
             frame_size_log2: 11, // 2^11 = 2048 (common default frame size)
-            owner_id: 0,
+            worker_id: 0,
             flags: 0,
             timer_kind: 0,
             rx_timestamp: 0,
@@ -61,7 +61,6 @@ impl WPdu {
     pub fn local_frame_offset(&self) -> usize {
         (self.desc_addr & !((1u64 << self.frame_size_log2) - 1)) as usize
     }
-    #[allow(dead_code)]
     #[inline(always)]
     fn local_frame_idx(&self) -> u32 {
         (self.local_frame_offset() >> self.frame_size_log2) as u32
@@ -74,19 +73,19 @@ impl WPdu {
     }
 
     #[inline]
-    pub fn frame_token(&self) -> u32 {
-        self.frame_token
+    pub fn umem_group_id(&self) -> u32 {
+        self.umem_group_id
     }
 
-    /// Returns the 8 bit partition ID carried by the frame token.
+    /// Returns the UMEM-local index of the frame containing `desc_addr`.
     #[inline]
-    pub fn partition_id(&self) -> u8 {
-        ((self.frame_token >> 23) & 0xff) as u8
+    pub fn frame_index(&self) -> u32 {
+        self.local_frame_idx()
     }
 
     #[inline]
-    pub fn owner_id(&self) -> u8 {
-        self.owner_id
+    pub fn worker_id(&self) -> u8 {
+        self.worker_id
     }
 
     /// Returns the host/plugin timer classification stored in reserved padding.

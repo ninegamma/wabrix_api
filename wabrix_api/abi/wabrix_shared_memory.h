@@ -38,9 +38,9 @@ typedef struct wabrix_wpdu {
     uint64_t desc_addr;
     uint32_t desc_len;
     uint32_t desc_options;
-    uint32_t frame_token;
+    uint32_t umem_group_id;
     uint8_t frame_size_log2;
-    uint8_t owner_id;
+    uint8_t worker_id;
     uint8_t flags;
     uint8_t timer_kind;
     uint64_t rx_timestamp;
@@ -75,9 +75,9 @@ WABRIX_STATIC_ASSERT(wpdu_header_stack, offsetof(wabrix_wpdu_t, header_stack) ==
 WABRIX_STATIC_ASSERT(wpdu_desc_addr, offsetof(wabrix_wpdu_t, desc_addr) == 16);
 WABRIX_STATIC_ASSERT(wpdu_desc_len, offsetof(wabrix_wpdu_t, desc_len) == 24);
 WABRIX_STATIC_ASSERT(wpdu_desc_options, offsetof(wabrix_wpdu_t, desc_options) == 28);
-WABRIX_STATIC_ASSERT(wpdu_frame_token, offsetof(wabrix_wpdu_t, frame_token) == 32);
+WABRIX_STATIC_ASSERT(wpdu_umem_group_id, offsetof(wabrix_wpdu_t, umem_group_id) == 32);
 WABRIX_STATIC_ASSERT(wpdu_frame_size_log2, offsetof(wabrix_wpdu_t, frame_size_log2) == 36);
-WABRIX_STATIC_ASSERT(wpdu_owner_id, offsetof(wabrix_wpdu_t, owner_id) == 37);
+WABRIX_STATIC_ASSERT(wpdu_worker_id, offsetof(wabrix_wpdu_t, worker_id) == 37);
 WABRIX_STATIC_ASSERT(wpdu_flags, offsetof(wabrix_wpdu_t, flags) == 38);
 WABRIX_STATIC_ASSERT(wpdu_timer_kind, offsetof(wabrix_wpdu_t, timer_kind) == 39);
 WABRIX_STATIC_ASSERT(wpdu_rx_timestamp, offsetof(wabrix_wpdu_t, rx_timestamp) == 40);

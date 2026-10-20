@@ -35,13 +35,12 @@ pub struct WPdu {
     pub desc_len: u32,
     /// AF_XDP descriptor options.
     pub desc_options: u32,
-    /// Frame token: partition ID plus partition-relative offset; bit 31 is
-    /// reserved for retain/release commands when transported through a return queue.
-    pub(crate) frame_token: u32,
+    /// UMEM group containing the frame described by `desc_addr`.
+    pub(crate) umem_group_id: u32,
     /// Base-2 logarithm of the frame size.
     pub frame_size_log2: u8,
-    /// Current frame owner.
-    pub(crate) owner_id: u8,
+    /// Worker that owns this frame.
+    pub(crate) worker_id: u8,
     /// Packet flags.
     pub flags: u8,
     /// Host/plugin timer classification.
@@ -89,9 +88,9 @@ const _: () = {
     assert!(core::mem::offset_of!(WPdu, desc_addr) == 16);
     assert!(core::mem::offset_of!(WPdu, desc_len) == 24);
     assert!(core::mem::offset_of!(WPdu, desc_options) == 28);
-    assert!(core::mem::offset_of!(WPdu, frame_token) == 32);
+    assert!(core::mem::offset_of!(WPdu, umem_group_id) == 32);
     assert!(core::mem::offset_of!(WPdu, frame_size_log2) == 36);
-    assert!(core::mem::offset_of!(WPdu, owner_id) == 37);
+    assert!(core::mem::offset_of!(WPdu, worker_id) == 37);
     assert!(core::mem::offset_of!(WPdu, flags) == 38);
     assert!(core::mem::offset_of!(WPdu, timer_kind) == 39);
     assert!(core::mem::offset_of!(WPdu, rx_timestamp) == 40);
