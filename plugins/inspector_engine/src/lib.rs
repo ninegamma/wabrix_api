@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Ref, RefCell, RefMut};
+use serde::{Deserialize, Serialize};
 
 use crate::exports::wabrix::plugins::packet_engine::{
     Counter, Guest, Histogram, TelemetryMetric, TimerPlan,
@@ -58,6 +59,22 @@ struct InspectorConfig {
     delay_histogram: [u64; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
 }
 
+const INSPECTOR_STATE_MAGIC: [u8; 4] = *b"INSP";
+const INSPECTOR_STATE_VERSION: u8 = 1;
+
+#[derive(Deserialize, Serialize)]
+struct InspectorState {
+    magic: [u8; 4],
+    version: u8,
+    bypass: bool,
+    packets_inspected: u64,
+    bytes_inspected: u64,
+    unexpected: u64,
+    delay_samples: u64,
+    delay_sum_us: u64,
+    delay_histogram: Vec<u64>,
+}
+
 impl Default for InspectorConfig {
     fn default() -> Self {
         Self {
@@ -93,6 +110,7 @@ struct DelayScale {
     frequency: u64,
     numerator: u32,
     denominator: u32,
+    denominator_reciprocal: u64,
     max_fast_cycles: u32,
 }
 
@@ -109,10 +127,16 @@ impl DelayScale {
         let numerator = (1_000_000 / a) as u32;
         let denominator = frequency / a;
         if denominator <= u32::MAX as u64 {
+            let denominator_reciprocal = if denominator == 0 {
+                0
+            } else {
+                (u32::MAX as u64 + 1) / denominator
+            };
             Self {
                 frequency,
                 numerator,
                 denominator: denominator as u32,
+                denominator_reciprocal,
                 max_fast_cycles: u32::MAX / numerator,
             }
         } else {
@@ -120,6 +144,7 @@ impl DelayScale {
                 frequency,
                 numerator,
                 denominator: 0,
+                denominator_reciprocal: 0,
                 max_fast_cycles: 0,
             }
         }
@@ -134,7 +159,12 @@ fn packet_delay_us(receive_tsc: u64, send_tsc: u64, scale: DelayScale) -> Option
 
     let elapsed_cycles = receive_tsc - send_tsc;
     if scale.denominator != 0 && elapsed_cycles <= scale.max_fast_cycles as u64 {
-        return Some(((elapsed_cycles as u32 * scale.numerator) / scale.denominator) as u64);
+        let scaled_cycles = elapsed_cycles as u32 * scale.numerator;
+        let quotient = ((u64::from(scaled_cycles) * scale.denominator_reciprocal) >> 32) as u32;
+        let remainder = scaled_cycles - quotient * scale.denominator;
+        // The floored reciprocal can underestimate the quotient by at most one
+        // for a u32 dividend; this correction makes the result exact.
+        return Some((quotient + u32::from(remainder >= scale.denominator)) as u64);
     }
 
     Some(packet_delay_us_fallback(elapsed_cycles, scale.frequency))
@@ -222,6 +252,47 @@ impl Guest for InspectorEngine {
         *CONFIG.borrow_mut() = config;
         log::info!("InspectorEngine initialized");
         true
+    }
+
+    fn save_state() -> Result<Vec<u8>, String> {
+        let config = CONFIG.borrow();
+        let state = InspectorState {
+            magic: INSPECTOR_STATE_MAGIC,
+            version: INSPECTOR_STATE_VERSION,
+            bypass: config.bypass,
+            packets_inspected: config.packets_inspected,
+            bytes_inspected: config.bytes_inspected,
+            unexpected: config.unexpected,
+            delay_samples: config.delay_samples,
+            delay_sum_us: config.delay_sum_us,
+            delay_histogram: config.delay_histogram.to_vec(),
+        };
+        postcard::to_allocvec(&state)
+            .map_err(|error| alloc::format!("serialize inspector state: {error}"))
+    }
+
+    fn restore_state(state: Vec<u8>) -> Result<(), String> {
+        if state.is_empty() {
+            return Ok(());
+        }
+        let state: InspectorState = postcard::from_bytes(&state)
+            .map_err(|error| alloc::format!("decode inspector state: {error}"))?;
+        if state.magic != INSPECTOR_STATE_MAGIC || state.version != INSPECTOR_STATE_VERSION {
+            return Err(String::from("unsupported inspector state format"));
+        }
+        if state.delay_histogram.len() != INSPECTOR_DELAY_HISTOGRAM_BUCKETS {
+            return Err(String::from("inspector histogram has an incompatible bucket count"));
+        }
+
+        let mut config = CONFIG.borrow_mut();
+        config.bypass = state.bypass;
+        config.packets_inspected = state.packets_inspected;
+        config.bytes_inspected = state.bytes_inspected;
+        config.unexpected = state.unexpected;
+        config.delay_samples = state.delay_samples;
+        config.delay_sum_us = state.delay_sum_us;
+        config.delay_histogram.copy_from_slice(&state.delay_histogram);
+        Ok(())
     }
 
     fn process_batch(batch_size: u32, umem_offset: u32, mailbox_offset: u32) -> u32 {

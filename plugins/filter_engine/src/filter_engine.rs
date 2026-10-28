@@ -72,6 +72,18 @@ pub fn init_logging() {
 struct FilterEngine;
 
 impl Guest for FilterEngine {
+    fn save_state() -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
+
+    fn restore_state(state: Vec<u8>) -> Result<(), String> {
+        if state.is_empty() {
+            Ok(())
+        } else {
+            Err(String::from("filter_engine does not support state restoration"))
+        }
+    }
+
     // Validates incoming configuration and prepares the active signature
     fn init_data(data: Vec<(String, String)>, _tsc_frequency: u64) -> bool {
         init_logging();

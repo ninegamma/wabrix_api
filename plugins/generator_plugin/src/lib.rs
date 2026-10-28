@@ -49,6 +49,20 @@ fn fast_rand(mut state: u32) -> u32 {
 }
 
 impl Guest for MyGenerator {
+    fn save_state() -> Result<Vec<u8>, alloc::string::String> {
+        Ok(Vec::new())
+    }
+
+    fn restore_state(state: Vec<u8>) -> Result<(), alloc::string::String> {
+        if state.is_empty() {
+            Ok(())
+        } else {
+            Err(alloc::string::String::from(
+                "generator_plugin does not support state restoration",
+            ))
+        }
+    }
+
     fn init_data(data: Vec<(alloc::string::String, alloc::string::String)>, worker_id: u32) {
         let mut config = GeneratorConfig::default();
 

@@ -118,6 +118,18 @@ fn init_state_machine(tcp_node_name: String) {
 struct TcpEngine;
 
 impl Guest for TcpEngine {
+    fn save_state() -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
+
+    fn restore_state(state: Vec<u8>) -> Result<(), String> {
+        if state.is_empty() {
+            Ok(())
+        } else {
+            Err(String::from("tcp_engine does not support state restoration"))
+        }
+    }
+
     // - init_data is called once per plugin instance, and is responsible for initializing the state of the plugin.
     // - It is called before any other function in the plugin.
     // - The init_data function is called with the following arguments:

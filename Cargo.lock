@@ -239,6 +239,21 @@ dependencies = [
  "macaddr",
  "network-types",
  "postcard",
+ "serde",
+ "spin 0.10.0",
+ "wabrix_api",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "inspector_engine_new"
+version = "0.5.1"
+dependencies = [
+ "log",
+ "macaddr",
+ "network-types",
+ "postcard",
+ "serde",
  "spin 0.10.0",
  "wabrix_api",
  "wit-bindgen",
