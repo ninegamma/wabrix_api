@@ -50,11 +50,29 @@ static CURRENT_TSC: WasmValue<u64> = WasmValue::new(0);
 static RUN_START_TSC: WasmValue<u64> = WasmValue::new(0);
 static GENERATION_START_TSC: WasmValue<u64> = WasmValue::new(0);
 static CONFIGURED_BATCH_SIZE: WasmValue<u32> = WasmValue::new(MAX_BATCH_SIZE as u32);
+static CONFIGURED_BATCH_SIZE_VARIANCE: WasmValue<u32> = WasmValue::new(0);
+static NEXT_BATCH_TARGET: WasmValue<u32> = WasmValue::new(0);
+static JITTER_PRNG_STATE: WasmValue<u64> = WasmValue::new(0x853c49e6748fea9b);
+
+#[inline(always)]
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    if x == 0 {
+        x = 0x853c49e6748fea9b;
+    }
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
 
 const ROUTE_TX: u32 = 0;
 const ROUTE_LINUX: u32 = 1;
 const ROUTE_DROP: u32 = 2;
 const TIMESTAMP_MAGIC: [u8; 4] = *b"WABR";
+const UDP_SEQUENCE_OFFSET: usize = TIMESTAMP_MAGIC.len() + size_of::<u64>();
+const UDP_PAYLOAD_LEN: usize = UDP_SEQUENCE_OFFSET + size_of::<u64>();
 
 // The zero-cost global counter array
 static TCP_STATS: WasmCell<[u64; STAT_COUNT]> = WasmCell::new([0; STAT_COUNT]);
@@ -134,6 +152,7 @@ fn prepare_udp_packet(
     template: &UdpPacketTemplate,
 ) {
     gen.packets_sent += 1;
+    let sequence = gen.packets_sent;
     let src_port = gen.port_counter;
     if gen.port_counter == PORT_END_RANGE {
         gen.port_counter = PORT_START_RANGE;
@@ -141,24 +160,26 @@ fn prepare_udp_packet(
         gen.port_counter += 1;
     }
 
-    template.write(packet, src_port);
+    template.write(packet, src_port, sequence);
 }
 
 /// The UDP payload carries the host TSC snapshot, which is constant during a
-/// batch. Only the source port changes from one generated packet to the next.
+/// batch. The sequence number and source port change for each generated packet.
 struct UdpPacketTemplate {
     mac: MacHeader,
     ip: IpHeader,
     udp: UdpHeader,
-    payload: [u8; 12],
-    checksum_without_port: u16,
+    payload: [u8; UDP_SEQUENCE_OFFSET],
+    checksum_without_dynamic_fields: u16,
 }
 
 impl UdpPacketTemplate {
     fn new(config: GeneratorBatchConfig, packet_tsc: u64) -> Self {
-        let mut payload = [0u8; 12];
+        let mut payload = [0u8; UDP_SEQUENCE_OFFSET];
         payload[..TIMESTAMP_MAGIC.len()].copy_from_slice(&TIMESTAMP_MAGIC);
         payload[TIMESTAMP_MAGIC.len()..].copy_from_slice(&packet_tsc.to_be_bytes());
+        let mut checksum_payload = [0u8; UDP_PAYLOAD_LEN];
+        checksum_payload[..payload.len()].copy_from_slice(&payload);
 
         let mut mac = MacHeader::new();
         mac.src = MacAddr6::from(config.src_mac);
@@ -172,22 +193,21 @@ impl UdpPacketTemplate {
         ip.set_version(4);
         ip.set_protocol(17);
         ip.set_ihl(5);
-        ip.set_length((size_of::<IpHeader>() + size_of::<UdpHeader>() + payload.len()) as u16);
+        ip.set_length((size_of::<IpHeader>() + size_of::<UdpHeader>() + UDP_PAYLOAD_LEN) as u16);
         ip.set_flags(0x2);
         ip.update_checksum();
 
         let mut udp = UdpHeader::new();
         udp.set_dst_port(80);
-        udp.set_length((size_of::<UdpHeader>() + payload.len()) as u16);
+        udp.set_length((size_of::<UdpHeader>() + UDP_PAYLOAD_LEN) as u16);
 
-        // Compute the complete checksum with a zero source port once. Adding
-        // the port's 16-bit word below is equivalent to checksumming the full
-        // UDP header and payload again for every packet.
-        let checksum_without_port = ipv4_checksum(
+        // Compute the checksum once with a zero source port and sequence.
+        // The changing source-port and sequence words are added per packet.
+        let checksum_without_dynamic_fields = ipv4_checksum(
             (&raw mut udp).cast::<u8>(),
             size_of::<UdpHeader>(),
             3,
-            &payload,
+            &checksum_payload,
             config.src_ip,
             config.dst_ip,
             17,
@@ -198,35 +218,49 @@ impl UdpPacketTemplate {
             ip,
             udp,
             payload,
-            checksum_without_port,
+            checksum_without_dynamic_fields,
         }
     }
 
     #[inline(always)]
-    fn udp_header_for_port(&self, src_port: u16) -> UdpHeader {
+    fn udp_header_for_packet(&self, src_port: u16, sequence: u64) -> UdpHeader {
         let mut udp = self.udp;
         udp.set_src_port(src_port);
+        let sequence_sum = ((sequence >> 48) as u16 as u32)
+            + ((sequence >> 32) as u16 as u32)
+            + ((sequence >> 16) as u16 as u32)
+            + (sequence as u16 as u32);
         udp.set_checksum(finalize_checksum(
-            (!self.checksum_without_port as u32) + src_port as u32,
+            (!self.checksum_without_dynamic_fields as u32) + src_port as u32 + sequence_sum,
         ));
         udp
     }
 
     #[inline(always)]
-    fn write(&self, packet: &mut MailboxPacket<'_>, src_port: u16) {
-        let udp = self.udp_header_for_port(src_port);
+    fn write(&self, packet: &mut MailboxPacket<'_>, src_port: u16, sequence: u64) {
+        let udp = self.udp_header_for_packet(src_port, sequence);
         let packet = packet.as_packet();
         let header_len = packet.write_mac_ipv4_udp_headers(&self.mac, &self.ip, &udp);
+        let sequence_bytes = sequence.to_be_bytes();
         // The UMEM frame is exclusively owned and has room for the fixed
-        // 12-byte timestamp payload, as in write_udp_packet.
+        // timestamp and sequence payload.
+        // SAFETY: The packet exclusively owns its UMEM frame; `header_len` is the end of
+        // the headers just written, and the frame has capacity for this fixed 20-byte payload.
+        // Both source arrays are stack-local and do not overlap the frame's payload region.
         unsafe {
+            let payload_ptr = packet.data_ptr_mut().add(header_len as usize);
             ptr::copy_nonoverlapping(
                 self.payload.as_ptr(),
-                packet.data_ptr_mut().add(header_len as usize),
+                payload_ptr,
                 self.payload.len(),
             );
+            ptr::copy_nonoverlapping(
+                sequence_bytes.as_ptr(),
+                payload_ptr.add(UDP_SEQUENCE_OFFSET),
+                sequence_bytes.len(),
+            );
         }
-        packet.resize_payload(header_len + self.payload.len() as u32);
+        packet.resize_payload(header_len + UDP_PAYLOAD_LEN as u32);
     }
 }
 
@@ -291,7 +325,11 @@ fn process_batch_for_protocol<const UDP: bool>(
                     packet.as_packet().set_timestamp(packet_start_tsc);
 
                     if UDP {
-                        prepare_udp_packet(&mut packet, &mut gen, udp_template.as_ref().unwrap());
+                        prepare_udp_packet(
+                            &mut packet,
+                            &mut gen,
+                            udp_template.as_ref().unwrap(),
+                        );
                     } else {
                         prepare_syn_packet(
                             &mut packet,
@@ -391,6 +429,32 @@ impl Guest for GeneratorEngine {
             return false;
         }
 
+        let configured_variance = data
+            .iter()
+            .find(|(key, _)| key == "batch_size_variance")
+            .map(|(_, value)| value.parse::<u32>());
+        let batch_size_variance = match configured_variance {
+            Some(Ok(variance)) => variance,
+            Some(Err(_)) => {
+                log::error!(
+                    "generator engine initialization failed: batch_size_variance must be a non-negative integer"
+                );
+                return false;
+            }
+            None => 0, // Keep batch targets fixed unless variance is configured.
+        };
+        if batch_size_variance >= batch_size
+            || batch_size.saturating_add(batch_size_variance) > MAX_BATCH_SIZE as u32
+        {
+            log::error!(
+                "generator engine initialization failed: batch_size {} with batch_size_variance {} must stay between 1 and MAX_BATCH_SIZE {}",
+                batch_size,
+                batch_size_variance,
+                MAX_BATCH_SIZE
+            );
+            return false;
+        }
+
         let Some((config, _node_name)) = parse_generator_config(data, tsc_frequency) else {
             log::error!(
                 "generator engine initialization failed: invalid or incomplete configuration"
@@ -399,6 +463,7 @@ impl Guest for GeneratorEngine {
         };
         *CONFIG.borrow_mut() = Some(config);
         CONFIGURED_BATCH_SIZE.set(batch_size);
+        CONFIGURED_BATCH_SIZE_VARIANCE.set(batch_size_variance);
 
         true
     }
@@ -488,20 +553,46 @@ impl Guest for GeneratorEngine {
                 let available_frames = gen.cycle_accumulator / tsc_freq;
                 diagnostics::record_available_frames(available_frames);
 
-                // Apply generation limits and cap at the configured node batch size.
-                let allowed_frames = match limit {
+                let nominal_batch = CONFIGURED_BATCH_SIZE.get().clamp(1, MAX_BATCH_SIZE as u32);
+                let delta = CONFIGURED_BATCH_SIZE_VARIANCE.get();
+                let mut target = NEXT_BATCH_TARGET.get();
+                if target == 0 {
+                    target = if delta > 0 {
+                        let mut prng = JITTER_PRNG_STATE.get();
+                        let rand_val = xorshift64(&mut prng);
+                        JITTER_PRNG_STATE.set(prng);
+                        let span = (2 * delta).saturating_add(1);
+                        (nominal_batch - delta).saturating_add((rand_val % (span as u64)) as u32)
+                    } else {
+                        nominal_batch
+                    };
+                    NEXT_BATCH_TARGET.set(target);
+                }
+
+                // If a generation limit is active and remaining packets is smaller than target,
+                // cap target so we don't stall waiting for unreachable credits.
+                let effective_target = match limit {
                     Some(max) if max > 0 => {
-                        available_frames.min(max.saturating_sub(gen.packets_sent))
+                        let remaining = max.saturating_sub(gen.packets_sent);
+                        (target as u64).min(remaining) as u32
                     }
-                    _ => available_frames, // Handles None and Some(0)
+                    _ => target,
                 };
 
-                let final_frames = (allowed_frames as u32).min(CONFIGURED_BATCH_SIZE.get());
+                let final_frames =
+                    if effective_target > 0 && available_frames >= (effective_target as u64) {
+                        let frames = (available_frames as u32).min(effective_target);
+                        NEXT_BATCH_TARGET.set(0);
+                        frames
+                    } else {
+                        0
+                    };
+
                 diagnostics::record_final_frames(
                     available_frames,
-                    allowed_frames,
+                    effective_target as u64,
                     final_frames,
-                    CONFIGURED_BATCH_SIZE.get(),
+                    nominal_batch,
                 );
 
                 // Deduct consumed cycles immediately
@@ -607,11 +698,15 @@ fn flush_state(mode: u8) {
         packet_gen.cycle_accumulator = 0;
         packet_gen.last_tsc = 0;
 
+        // Reset inter-batch jitter target
+        NEXT_BATCH_TARGET.set(0);
+
         // Optional: If mode == 1 (Hard Reset), also reset the PRNG and Port Counter
         // to ensure perfectly repeatable PCAP generation across test runs.
         if mode == 1 {
             packet_gen.port_counter = PORT_START_RANGE;
             packet_gen.prng_state = 1;
+            JITTER_PRNG_STATE.set(0x853c49e6748fea9b);
         }
     }
 
@@ -623,10 +718,14 @@ fn flush_state(mode: u8) {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::vec::Vec;
+    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn udp_template_matches_full_packet_checksum() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let config = GeneratorBatchConfig {
             generation_rate: 1,
             generation_limit: None,
@@ -640,18 +739,26 @@ mod tests {
         for timestamp in [0, 1, 0x1234_5678_9abc_def0, u64::MAX] {
             let template = UdpPacketTemplate::new(config, timestamp);
             assert_eq!(&template.payload[..4], &TIMESTAMP_MAGIC);
-            assert_eq!(&template.payload[4..], &timestamp.to_be_bytes());
+            assert_eq!(
+                &template.payload[TIMESTAMP_MAGIC.len()..UDP_SEQUENCE_OFFSET],
+                &timestamp.to_be_bytes()
+            );
+
+            let sequence: u64 = 0x0123_4567_89ab_cdef;
+            let mut payload = [0u8; UDP_PAYLOAD_LEN];
+            payload[..UDP_SEQUENCE_OFFSET].copy_from_slice(&template.payload);
+            payload[UDP_SEQUENCE_OFFSET..].copy_from_slice(&sequence.to_be_bytes());
 
             for port in [
                 0,
                 1,
                 PORT_START_RANGE,
                 32_768,
-                template.checksum_without_port,
+                template.checksum_without_dynamic_fields,
                 PORT_END_RANGE,
             ] {
-                let udp = template.udp_header_for_port(port);
-                let mut full_datagram = [0u8; size_of::<UdpHeader>() + 12];
+                let udp = template.udp_header_for_packet(port, sequence);
+                let mut full_datagram = [0u8; size_of::<UdpHeader>() + UDP_PAYLOAD_LEN];
                 unsafe {
                     ptr::copy_nonoverlapping(
                         (&raw const udp).cast::<u8>(),
@@ -659,7 +766,7 @@ mod tests {
                         size_of::<UdpHeader>(),
                     );
                 }
-                full_datagram[size_of::<UdpHeader>()..].copy_from_slice(&template.payload);
+                full_datagram[size_of::<UdpHeader>()..].copy_from_slice(&payload);
                 let expected = ipv4_checksum(
                     full_datagram.as_mut_ptr(),
                     full_datagram.len(),
@@ -676,6 +783,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn process_timers_jitter_bounds_and_conservation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        flush_state(1);
+        set_state(1);
+
+        let tsc_freq = 3_000_000_000u64; // 3 GHz
+        let rate = 1_000_000u64; // 1 Mpps
+        let nominal_batch = 32u32;
+        CONFIGURED_BATCH_SIZE.set(nominal_batch);
+        CONFIGURED_BATCH_SIZE_VARIANCE.set(nominal_batch / 2);
+
+        let mut config = GeneratorConfig::default();
+        config.tsc_frequency = tsc_freq;
+        config.generation_rate = Some(rate);
+        config.generation_limit = None;
+        *CONFIG.borrow_mut() = Some(config);
+
+        let mut current_tsc = 10_000_000u64;
+        let mut total_packets = 0u64;
+        let mut batch_sizes = Vec::new();
+
+        // Step through small time slices (e.g. 5 microseconds each step)
+        let delta_step = 15_000u64; // 5us at 3GHz = 15,000 cycles (expecting ~5 packets per step)
+        for _ in 0..10_000 {
+            current_tsc += delta_step;
+            let plan = GeneratorEngine::process_timers(current_tsc);
+            if plan.packet_frames > 0 {
+                assert!(
+                    plan.packet_frames <= MAX_BATCH_SIZE as u32,
+                    "Batch size {} exceeded MAX_BATCH_SIZE {}",
+                    plan.packet_frames,
+                    MAX_BATCH_SIZE
+                );
+                assert!(
+                    plan.packet_frames >= (nominal_batch / 2),
+                    "Batch size {} below minimum expected",
+                    plan.packet_frames
+                );
+                assert!(
+                    plan.packet_frames <= (nominal_batch + nominal_batch / 2),
+                    "Batch size {} above maximum expected",
+                    plan.packet_frames
+                );
+                total_packets += plan.packet_frames as u64;
+                batch_sizes.push(plan.packet_frames);
+            }
+        }
+
+        // Verify there is variation in batch sizes
+        let first_size = batch_sizes[0];
+        let has_variation = batch_sizes.iter().any(|&s| s != first_size);
+        assert!(has_variation, "Batch sizes should vary dynamically");
+
+        // Verify that total packets generated matches expected rate over total elapsed time
+        let elapsed_tsc = 10_000 * delta_step;
+        let expected_packets = (elapsed_tsc * rate) / tsc_freq;
+        let diff = total_packets.abs_diff(expected_packets);
+        assert!(
+            diff <= MAX_BATCH_SIZE as u64,
+            "Total generated packets {} deviated significantly from expected {}",
+            total_packets,
+            expected_packets
+        );
+    }
+
+    #[test]
+    fn process_timers_respects_max_batch_size_when_configured_large() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        flush_state(1);
+        set_state(1);
+
+        let tsc_freq = 3_000_000_000u64;
+        let rate = 10_000_000u64;
+        CONFIGURED_BATCH_SIZE.set(MAX_BATCH_SIZE as u32);
+        CONFIGURED_BATCH_SIZE_VARIANCE.set(0);
+
+        let mut config = GeneratorConfig::default();
+        config.tsc_frequency = tsc_freq;
+        config.generation_rate = Some(rate);
+        config.generation_limit = None;
+        *CONFIG.borrow_mut() = Some(config);
+
+        let mut current_tsc = 10_000_000u64;
+        // Large jump in TSC
+        current_tsc += 3_000_000_000u64; // 1 second
+        let plan = GeneratorEngine::process_timers(current_tsc);
+
+        assert!(
+            plan.packet_frames <= MAX_BATCH_SIZE as u32,
+            "Packet frames {} exceeded MAX_BATCH_SIZE {}",
+            plan.packet_frames,
+            MAX_BATCH_SIZE
+        );
     }
 }
 

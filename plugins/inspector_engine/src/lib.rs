@@ -27,6 +27,9 @@ wit_bindgen::generate!({
 const ROUTE_TX: u32 = 0;
 const ROUTE_DROP: u32 = 1;
 const TIMESTAMP_MAGIC: [u8; 4] = *b"WABR";
+const SEND_TSC_OFFSET: usize = TIMESTAMP_MAGIC.len();
+const UDP_SEQUENCE_OFFSET: usize = SEND_TSC_OFFSET + core::mem::size_of::<u64>();
+const GENERATED_UDP_PAYLOAD_LEN: usize = UDP_SEQUENCE_OFFSET + core::mem::size_of::<u64>();
 
 struct WasmCell<T>(RefCell<T>);
 
@@ -57,6 +60,20 @@ struct InspectorConfig {
     delay_samples: u64,
     delay_sum_us: u64,
     delay_histogram: [u64; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
+    // Next sequence expected, starting at 1.
+    next_sequence: u64,
+    // Count of marked UDP packets with a readable sequence.
+    sequence_packets: u64,
+    // Missing sequence values inferred from forward gaps.
+    sequence_missing: u64,
+    // Packets whose sequence is below the expected value.
+    sequence_out_of_sequence: u64,
+    // Marked payloads too short to contain a sequence.
+    sequence_malformed: u64,
+    // Last totals logged, so telemetry reports only new anomalies.
+    logged_sequence_missing: u64,
+    logged_sequence_out_of_sequence: u64,
+    logged_sequence_malformed: u64,
 }
 
 const INSPECTOR_STATE_MAGIC: [u8; 4] = *b"INSP";
@@ -73,6 +90,14 @@ struct InspectorState {
     delay_samples: u64,
     delay_sum_us: u64,
     delay_histogram: Vec<u64>,
+    next_sequence: u64,
+    sequence_packets: u64,
+    sequence_missing: u64,
+    sequence_out_of_sequence: u64,
+    sequence_malformed: u64,
+    logged_sequence_missing: u64,
+    logged_sequence_out_of_sequence: u64,
+    logged_sequence_malformed: u64,
 }
 
 impl Default for InspectorConfig {
@@ -88,6 +113,14 @@ impl Default for InspectorConfig {
             delay_samples: 0,
             delay_sum_us: 0,
             delay_histogram: [0; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
+            next_sequence: 1,
+            sequence_packets: 0,
+            sequence_missing: 0,
+            sequence_out_of_sequence: 0,
+            sequence_malformed: 0,
+            logged_sequence_missing: 0,
+            logged_sequence_out_of_sequence: 0,
+            logged_sequence_malformed: 0,
         }
     }
 }
@@ -103,6 +136,14 @@ static CONFIG: WasmCell<InspectorConfig> = WasmCell::new(InspectorConfig {
     delay_samples: 0,
     delay_sum_us: 0,
     delay_histogram: [0; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
+    next_sequence: 1,
+    sequence_packets: 0,
+    sequence_missing: 0,
+    sequence_out_of_sequence: 0,
+    sequence_malformed: 0,
+    logged_sequence_missing: 0,
+    logged_sequence_out_of_sequence: 0,
+    logged_sequence_malformed: 0,
 });
 
 #[derive(Clone, Copy)]
@@ -168,6 +209,49 @@ fn packet_delay_us(receive_tsc: u64, send_tsc: u64, scale: DelayScale) -> Option
     }
 
     Some(packet_delay_us_fallback(elapsed_cycles, scale.frequency))
+}
+
+#[derive(Clone, Copy)]
+struct GeneratedUdpMetadata {
+    send_tsc: u64,
+    sequence: u64,
+}
+
+#[inline]
+fn parse_generated_udp_payload(payload: &[u8]) -> Result<Option<GeneratedUdpMetadata>, ()> {
+    if payload.get(..TIMESTAMP_MAGIC.len()) != Some(TIMESTAMP_MAGIC.as_slice()) {
+        return Ok(None);
+    }
+    if payload.len() < GENERATED_UDP_PAYLOAD_LEN {
+        return Err(());
+    }
+
+    let send_tsc = u64::from_be_bytes(
+        payload[SEND_TSC_OFFSET..UDP_SEQUENCE_OFFSET]
+            .try_into()
+            .map_err(|_| ())?,
+    );
+    let sequence = u64::from_be_bytes(
+        payload[UDP_SEQUENCE_OFFSET..GENERATED_UDP_PAYLOAD_LEN]
+            .try_into()
+            .map_err(|_| ())?,
+    );
+    Ok(Some(GeneratedUdpMetadata { send_tsc, sequence }))
+}
+
+#[inline]
+fn record_sequence(config: &mut InspectorConfig, sequence: u64) {
+    config.sequence_packets = config.sequence_packets.saturating_add(1);
+    if sequence == config.next_sequence {
+        config.next_sequence = config.next_sequence.saturating_add(1);
+    } else if sequence > config.next_sequence {
+        config.sequence_missing = config
+            .sequence_missing
+            .saturating_add(sequence - config.next_sequence);
+        config.next_sequence = sequence.saturating_add(1);
+    } else {
+        config.sequence_out_of_sequence = config.sequence_out_of_sequence.saturating_add(1);
+    }
 }
 
 #[cold]
@@ -266,6 +350,14 @@ impl Guest for InspectorEngine {
             delay_samples: config.delay_samples,
             delay_sum_us: config.delay_sum_us,
             delay_histogram: config.delay_histogram.to_vec(),
+            next_sequence: config.next_sequence,
+            sequence_packets: config.sequence_packets,
+            sequence_missing: config.sequence_missing,
+            sequence_out_of_sequence: config.sequence_out_of_sequence,
+            sequence_malformed: config.sequence_malformed,
+            logged_sequence_missing: config.logged_sequence_missing,
+            logged_sequence_out_of_sequence: config.logged_sequence_out_of_sequence,
+            logged_sequence_malformed: config.logged_sequence_malformed,
         };
         postcard::to_allocvec(&state)
             .map_err(|error| alloc::format!("serialize inspector state: {error}"))
@@ -281,7 +373,9 @@ impl Guest for InspectorEngine {
             return Err(String::from("unsupported inspector state format"));
         }
         if state.delay_histogram.len() != INSPECTOR_DELAY_HISTOGRAM_BUCKETS {
-            return Err(String::from("inspector histogram has an incompatible bucket count"));
+            return Err(String::from(
+                "inspector histogram has an incompatible bucket count",
+            ));
         }
 
         let mut config = CONFIG.borrow_mut();
@@ -291,7 +385,17 @@ impl Guest for InspectorEngine {
         config.unexpected = state.unexpected;
         config.delay_samples = state.delay_samples;
         config.delay_sum_us = state.delay_sum_us;
-        config.delay_histogram.copy_from_slice(&state.delay_histogram);
+        config
+            .delay_histogram
+            .copy_from_slice(&state.delay_histogram);
+        config.next_sequence = state.next_sequence;
+        config.sequence_packets = state.sequence_packets;
+        config.sequence_missing = state.sequence_missing;
+        config.sequence_out_of_sequence = state.sequence_out_of_sequence;
+        config.sequence_malformed = state.sequence_malformed;
+        config.logged_sequence_missing = state.logged_sequence_missing;
+        config.logged_sequence_out_of_sequence = state.logged_sequence_out_of_sequence;
+        config.logged_sequence_malformed = state.logged_sequence_malformed;
         Ok(())
     }
 
@@ -312,22 +416,25 @@ impl Guest for InspectorEngine {
                 config.packets_inspected += 1;
                 config.bytes_inspected += packet.data_len() as u64;
 
-                let send_tsc = if packet.udp_header().is_some() {
-                    packet.payload().and_then(|payload| {
-                        let timestamp_start = TIMESTAMP_MAGIC.len();
-                        let timestamp_end = timestamp_start + core::mem::size_of::<u64>();
-                        let bytes = payload.get(..timestamp_end)?;
-                        (bytes[..timestamp_start] == TIMESTAMP_MAGIC)
-                            .then(|| bytes[timestamp_start..timestamp_end].try_into().ok())
-                            .flatten()
-                            .map(u64::from_be_bytes)
-                    })
+                let metadata = if packet.udp_header().is_some() {
+                    packet.payload().map(parse_generated_udp_payload)
                 } else {
                     None
                 };
+                let metadata = match metadata {
+                    Some(Ok(Some(metadata))) => {
+                        record_sequence(&mut config, metadata.sequence);
+                        Some(metadata)
+                    }
+                    Some(Err(())) => {
+                        config.sequence_malformed = config.sequence_malformed.saturating_add(1);
+                        None
+                    }
+                    Some(Ok(None)) | None => None,
+                };
 
-                match send_tsc.and_then(|send_tsc| {
-                    packet_delay_us(packet.timestamp(), send_tsc, delay_scale)
+                match metadata.and_then(|metadata| {
+                    packet_delay_us(packet.timestamp(), metadata.send_tsc, delay_scale)
                 }) {
                     Some(delay_us) => {
                         config.delay_samples += 1;
@@ -400,7 +507,31 @@ impl Guest for InspectorEngine {
     }
 
     fn get_telemetry() -> Vec<TelemetryMetric> {
-        let config = CONFIG.borrow();
+        let mut config = CONFIG.borrow_mut();
+
+        let new_missing = config
+            .sequence_missing
+            .saturating_sub(config.logged_sequence_missing);
+        let new_out_of_sequence = config
+            .sequence_out_of_sequence
+            .saturating_sub(config.logged_sequence_out_of_sequence);
+        let new_malformed = config
+            .sequence_malformed
+            .saturating_sub(config.logged_sequence_malformed);
+        if new_missing > 0 || new_out_of_sequence > 0 || new_malformed > 0 {
+            log::warn!(
+                "UDP sequence anomalies since previous telemetry report: missing={}, out_of_sequence={}, malformed={} (totals: missing={}, out_of_sequence={}, malformed={})",
+                new_missing,
+                new_out_of_sequence,
+                new_malformed,
+                config.sequence_missing,
+                config.sequence_out_of_sequence,
+                config.sequence_malformed
+            );
+        }
+        config.logged_sequence_missing = config.sequence_missing;
+        config.logged_sequence_out_of_sequence = config.sequence_out_of_sequence;
+        config.logged_sequence_malformed = config.sequence_malformed;
 
         let telemetry = alloc::vec![
             TelemetryMetric::Counter(Counter {
@@ -414,6 +545,22 @@ impl Guest for InspectorEngine {
             TelemetryMetric::Counter(Counter {
                 name: String::from("unexpected"),
                 value: config.unexpected
+            }),
+            TelemetryMetric::Counter(Counter {
+                name: String::from("sequence_packets"),
+                value: config.sequence_packets
+            }),
+            TelemetryMetric::Counter(Counter {
+                name: String::from("sequence_missing"),
+                value: config.sequence_missing
+            }),
+            TelemetryMetric::Counter(Counter {
+                name: String::from("sequence_out_of_sequence"),
+                value: config.sequence_out_of_sequence
+            }),
+            TelemetryMetric::Counter(Counter {
+                name: String::from("sequence_malformed"),
+                value: config.sequence_malformed
             }),
             TelemetryMetric::Hist(Histogram {
                 name: String::from("delay"),

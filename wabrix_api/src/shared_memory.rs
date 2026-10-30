@@ -6,7 +6,7 @@
 use crate::headers::HeaderKind;
 
 /// Maximum number of packet descriptors in one mailbox batch.
-pub const MAX_BATCH_SIZE: usize = 512;
+pub const MAX_BATCH_SIZE: usize = 768;
 
 /// Number of headers represented by [`HeaderStack`].
 pub const MAX_HEADERS: usize = 5;
@@ -78,7 +78,11 @@ const _: () = assert!(core::mem::size_of::<HeaderStack>() == 16);
 const _: () = assert!(core::mem::size_of::<WPdu>() == 56);
 const _: () = assert!(core::mem::size_of::<Pdu0>() == 64);
 const _: () = assert!(core::mem::align_of::<Pdu0>() == 64);
-const _: () = assert!(core::mem::size_of::<BatchMetadata>() == 34_816);
+const _: () = assert!(
+    core::mem::size_of::<BatchMetadata>()
+        == MAX_BATCH_SIZE * core::mem::size_of::<Pdu0>()
+            + MAX_BATCH_SIZE * core::mem::size_of::<u32>()
+);
 
 const _: () = {
     assert!(core::mem::offset_of!(HeaderStack, offsets) == 0);
@@ -98,5 +102,8 @@ const _: () = {
     assert!(core::mem::offset_of!(Pdu0, w) == 0);
     assert!(core::mem::offset_of!(Pdu0, _do_not_touch_padding) == 56);
     assert!(core::mem::offset_of!(BatchMetadata, pdus) == 0);
-    assert!(core::mem::offset_of!(BatchMetadata, actions) == 32_768);
+    assert!(
+        core::mem::offset_of!(BatchMetadata, actions)
+            == MAX_BATCH_SIZE * core::mem::size_of::<Pdu0>()
+    );
 };
