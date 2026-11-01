@@ -249,11 +249,7 @@ impl UdpPacketTemplate {
         // Both source arrays are stack-local and do not overlap the frame's payload region.
         unsafe {
             let payload_ptr = packet.data_ptr_mut().add(header_len as usize);
-            ptr::copy_nonoverlapping(
-                self.payload.as_ptr(),
-                payload_ptr,
-                self.payload.len(),
-            );
+            ptr::copy_nonoverlapping(self.payload.as_ptr(), payload_ptr, self.payload.len());
             ptr::copy_nonoverlapping(
                 sequence_bytes.as_ptr(),
                 payload_ptr.add(UDP_SEQUENCE_OFFSET),
@@ -325,11 +321,7 @@ fn process_batch_for_protocol<const UDP: bool>(
                     packet.as_packet().set_timestamp(packet_start_tsc);
 
                     if UDP {
-                        prepare_udp_packet(
-                            &mut packet,
-                            &mut gen,
-                            udp_template.as_ref().unwrap(),
-                        );
+                        prepare_udp_packet(&mut packet, &mut gen, udp_template.as_ref().unwrap());
                     } else {
                         prepare_syn_packet(
                             &mut packet,
@@ -387,16 +379,11 @@ fn process_batch_for_protocol<const UDP: bool>(
 struct GeneratorEngine;
 
 impl Guest for GeneratorEngine {
-    fn save_state() -> Result<Vec<u8>, String> {
-        Ok(Vec::new())
-    }
-
-    fn restore_state(state: Vec<u8>) -> Result<(), String> {
-        if state.is_empty() {
-            Ok(())
-        } else {
-            Err(String::from("generator_engine does not support state restoration"))
-        }
+    fn upgrade_shared_state(
+        _source_schema_version: u32,
+        _source_payload_size: u32,
+    ) -> Result<(), String> {
+        Err(String::from("generator_engine has no shared-state migration"))
     }
 
     // - init_data is called once per plugin instance, and is responsible for initializing the state of the plugin.

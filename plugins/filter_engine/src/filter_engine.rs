@@ -72,16 +72,11 @@ pub fn init_logging() {
 struct FilterEngine;
 
 impl Guest for FilterEngine {
-    fn save_state() -> Result<Vec<u8>, String> {
-        Ok(Vec::new())
-    }
-
-    fn restore_state(state: Vec<u8>) -> Result<(), String> {
-        if state.is_empty() {
-            Ok(())
-        } else {
-            Err(String::from("filter_engine does not support state restoration"))
-        }
+    fn upgrade_shared_state(
+        _source_schema_version: u32,
+        _source_payload_size: u32,
+    ) -> Result<(), String> {
+        Err(String::from("filter_engine has no shared-state migration"))
     }
 
     // Validates incoming configuration and prepares the active signature

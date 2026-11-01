@@ -30,11 +30,13 @@ interface packet-engine {
     /// Called once at startup with admin key/value data from the node config (node_data field)
     init-data: func(data: list<tuple<string, string>>, tsc-frequency: u64) -> bool;
 
-    /// Serialize plugin-owned runtime state for transfer to a replacement instance.
-    save-state: func() -> result<list<u8>, string>;
-
-    /// Restore a snapshot produced by a compatible version of this plugin.
-    restore-state: func(state: list<u8>) -> result<_, string>;
+    /// Upgrade the shared payload after the runner has stopped the old runtime.
+    /// The plugin may initialize appended fields only; the host commits the new
+    /// schema version and size after this call succeeds.
+    upgrade-shared-state: func(
+        source-schema-version: u32,
+        source-payload-size: u32
+    ) -> result<_, string>;
 
     /// Zero-copy batch processing via the shared UMEM mailbox.
     /// The host writes desc_addrs/lengths into the mailbox before calling; the plugin
@@ -55,6 +57,38 @@ interface packet-engine {
 
 interface logging {
     log: func(level: u32, message: string);
+}
+
+/// Host access to the fixed-layout state region shared by active and staged
+/// instances of one reloadable plugin node.
+interface shared-state {
+    /// The plugin's fixed state layout and schema compatibility declaration.
+    record state-layout {
+        /// Exactly 16 bytes identifying this state type across plugin releases.
+        type-id: list<u8>,
+        schema-version: u32,
+        payload-size: u32,
+        reserved-capacity: u32,
+        required-alignment: u32,
+        /// Older payload schema versions this plugin knows how to extend.
+        compatible-source-versions: list<u32>,
+    }
+
+    /// A validated guest-linear view of the shared payload.
+    record state-view {
+        payload-offset: u32,
+        payload-capacity: u32,
+        current-schema-version: u32,
+        current-payload-size: u32,
+        is-new: bool,
+        upgrade-required: bool,
+    }
+
+    /// Validate the plugin layout and obtain its payload offset. A fresh region
+    /// gets a host-written header; an append-compatible older schema is
+    /// reported so the runner can call upgrade-shared-state at the switchover
+    /// checkpoint, after the old runtime is quiescent.
+    attach: func(layout: state-layout) -> result<state-view, string>;
 }
 
 /// The interface for nodes that generate new synthetic traffic.
@@ -87,4 +121,5 @@ world generator-plugin {
 world engine-plugin {
     export packet-engine;
     import logging;
+    import shared-state;
 }

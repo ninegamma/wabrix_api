@@ -10,6 +10,7 @@ pub mod helpers;
 pub mod mailbox_api;
 pub mod packet;
 pub mod shared_memory;
+pub mod shared_state;
 // Declare the implementation file, but keep it hidden from the outside world.
 mod wpdu_impl;
 // Declare the routing module as public.
@@ -21,16 +22,15 @@ mod hstack;
 pub mod tcp_common;
 
 pub use shared_memory::{BatchMetadata, SharedMailbox, SharedPdu, WpduCore, MAX_BATCH_SIZE};
+pub use shared_state::SharedState;
 
 /// Timer frame kinds stored in the reserved WPdu padding byte.
 pub const TIMER_KIND_NONE: u8 = 0;
 pub const TIMER_KIND_TIMEOUT: u8 = 1;
 pub const TIMER_KIND_SYN: u8 = 2;
 
-/// Histogram resolution and range shared by the inspector plugin and host.
-pub const INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US: u64 = 10;
-pub const INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS: usize = 100;
-pub const INSPECTOR_DELAY_HISTOGRAM_BUCKETS: usize = INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS + 1;
+
+pub const MAX_HISTOGRAM_BUCKETS: usize = 101;
 
 /// Strongly typed enum for the reserved standard opcodes (0x0000 - 0x0FFF).
 /// These represent generic system events that any plugin should understand.

@@ -5,19 +5,23 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Ref, RefCell, RefMut};
-use serde::{Deserialize, Serialize};
 
 use crate::exports::wabrix::plugins::packet_engine::{
     Counter, Guest, Histogram, TelemetryMetric, TimerPlan,
 };
 use crate::wabrix::plugins::logging;
+use crate::wabrix::plugins::shared_state::{self, StateLayout};
 //use macaddr::MacAddr6;
 use wabrix_api::helpers::parse_mac;
 use wabrix_api::mailbox_api::MailboxBatch;
+use wabrix_api::SharedState;
 use wabrix_api::{
-    HotWasmPayload, PluginOpcode, StandardOpcode, INSPECTOR_DELAY_HISTOGRAM_BUCKETS,
-    INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US, INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS,
+    HotWasmPayload, PluginOpcode, StandardOpcode, MAX_HISTOGRAM_BUCKETS,
 };
+
+/// Histogram resolution and range shared by the inspector plugin and host.
+pub const INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US: u64 = 10;
+pub const INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS: usize = MAX_HISTOGRAM_BUCKETS -1;
 
 wit_bindgen::generate!({
     path: "../../wit/wabrix.wit",
@@ -50,16 +54,25 @@ impl<T> WasmCell<T> {
 }
 
 struct InspectorConfig {
-    bypass: bool,
     src_mac: Option<[u8; 6]>,
     dst_mac: Option<[u8; 6]>,
     delay_scale: DelayScale,
+    shared_state: Option<SharedState<InspectorSharedState>>,
+    pending_upgrade: Option<(u32, u32)>,
+}
+
+/// Persistent Inspector fields stored directly in the host-shared region.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InspectorSharedState {
+    bypass: u8,
+    _reserved: [u8; 7],
     packets_inspected: u64,
     bytes_inspected: u64,
     unexpected: u64,
     delay_samples: u64,
     delay_sum_us: u64,
-    delay_histogram: [u64; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
+    delay_histogram: [u64; MAX_HISTOGRAM_BUCKETS],
     // Next sequence expected, starting at 1.
     next_sequence: u64,
     // Count of marked UDP packets with a readable sequence.
@@ -76,44 +89,18 @@ struct InspectorConfig {
     logged_sequence_malformed: u64,
 }
 
-const INSPECTOR_STATE_MAGIC: [u8; 4] = *b"INSP";
-const INSPECTOR_STATE_VERSION: u8 = 1;
-
-#[derive(Deserialize, Serialize)]
-struct InspectorState {
-    magic: [u8; 4],
-    version: u8,
-    bypass: bool,
-    packets_inspected: u64,
-    bytes_inspected: u64,
-    unexpected: u64,
-    delay_samples: u64,
-    delay_sum_us: u64,
-    delay_histogram: Vec<u64>,
-    next_sequence: u64,
-    sequence_packets: u64,
-    sequence_missing: u64,
-    sequence_out_of_sequence: u64,
-    sequence_malformed: u64,
-    logged_sequence_missing: u64,
-    logged_sequence_out_of_sequence: u64,
-    logged_sequence_malformed: u64,
-}
-
-impl Default for InspectorConfig {
+impl Default for InspectorSharedState {
     fn default() -> Self {
         Self {
-            bypass: false,
-            src_mac: None,
-            dst_mac: None,
-            delay_scale: DelayScale::new(0),
+            bypass: 0,
+            _reserved: [0; 7],
             packets_inspected: 0,
             bytes_inspected: 0,
             unexpected: 0,
             delay_samples: 0,
             delay_sum_us: 0,
-            delay_histogram: [0; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
-            next_sequence: 1,
+            delay_histogram: [0; MAX_HISTOGRAM_BUCKETS],
+            next_sequence: 0,
             sequence_packets: 0,
             sequence_missing: 0,
             sequence_out_of_sequence: 0,
@@ -125,25 +112,29 @@ impl Default for InspectorConfig {
     }
 }
 
+const INSPECTOR_SHARED_STATE_TYPE_ID: [u8; 16] = [
+    0xf5, 0x7b, 0x87, 0x9a, 0x1c, 0xa2, 0x4e, 0xd9, 0xa9, 0x02, 0x7c, 0x2f, 0x8a, 0x5d, 0xb1, 0x34,
+];
+const INSPECTOR_SHARED_STATE_SCHEMA_VERSION: u32 = 1;
+
+impl Default for InspectorConfig {
+    fn default() -> Self {
+        Self {
+            src_mac: None,
+            dst_mac: None,
+            delay_scale: DelayScale::new(0),
+            shared_state: None,
+            pending_upgrade: None,
+        }
+    }
+}
+
 static CONFIG: WasmCell<InspectorConfig> = WasmCell::new(InspectorConfig {
-    bypass: false,
     src_mac: None,
     dst_mac: None,
     delay_scale: DelayScale::new(0),
-    packets_inspected: 0,
-    bytes_inspected: 0,
-    unexpected: 0,
-    delay_samples: 0,
-    delay_sum_us: 0,
-    delay_histogram: [0; INSPECTOR_DELAY_HISTOGRAM_BUCKETS],
-    next_sequence: 1,
-    sequence_packets: 0,
-    sequence_missing: 0,
-    sequence_out_of_sequence: 0,
-    sequence_malformed: 0,
-    logged_sequence_missing: 0,
-    logged_sequence_out_of_sequence: 0,
-    logged_sequence_malformed: 0,
+    shared_state: None,
+    pending_upgrade: None,
 });
 
 #[derive(Clone, Copy)]
@@ -217,7 +208,7 @@ struct GeneratedUdpMetadata {
     sequence: u64,
 }
 
-#[inline]
+#[inline(always)]
 fn parse_generated_udp_payload(payload: &[u8]) -> Result<Option<GeneratedUdpMetadata>, ()> {
     if payload.get(..TIMESTAMP_MAGIC.len()) != Some(TIMESTAMP_MAGIC.as_slice()) {
         return Ok(None);
@@ -239,8 +230,8 @@ fn parse_generated_udp_payload(payload: &[u8]) -> Result<Option<GeneratedUdpMeta
     Ok(Some(GeneratedUdpMetadata { send_tsc, sequence }))
 }
 
-#[inline]
-fn record_sequence(config: &mut InspectorConfig, sequence: u64) {
+#[inline(always)]
+fn record_sequence(config: &mut InspectorSharedState, sequence: u64) {
     config.sequence_packets = config.sequence_packets.saturating_add(1);
     if sequence == config.next_sequence {
         config.next_sequence = config.next_sequence.saturating_add(1);
@@ -317,13 +308,72 @@ fn init_logging() {
     log::set_max_level(log::LevelFilter::Info);
 }
 
+fn set_shared_bypass(bypass: bool) -> bool {
+    let mut config = CONFIG.borrow_mut();
+    let Some(shared_state) = config.shared_state.as_mut() else {
+        return false;
+    };
+    // SAFETY: Control events are delivered to the active instance at the
+    // runner boundary, when no staged runtime accesses the shared payload.
+    unsafe {
+        shared_state.with_mut(|state| state.bypass = u8::from(bypass));
+    }
+    true
+}
+
 struct InspectorEngine;
 
 impl Guest for InspectorEngine {
     fn init_data(data: Vec<(String, String)>, tsc_frequency: u64) -> bool {
         init_logging();
+        let layout = StateLayout {
+            type_id: INSPECTOR_SHARED_STATE_TYPE_ID.to_vec(),
+            schema_version: INSPECTOR_SHARED_STATE_SCHEMA_VERSION,
+            payload_size: core::mem::size_of::<InspectorSharedState>() as u32,
+            reserved_capacity: 127 * 1024,
+            required_alignment: core::mem::align_of::<InspectorSharedState>() as u32,
+            compatible_source_versions: Vec::new(),
+        };
+        let view = match shared_state::attach(&layout) {
+            Ok(view) => view,
+            Err(error) => {
+                log::error!("could not attach Inspector shared state: {}", error);
+                return false;
+            }
+        };
+        let pending_upgrade = view
+            .upgrade_required
+            .then_some((view.current_schema_version, view.current_payload_size));
+        // SAFETY: The host validated the region bounds and layout and returned
+        // an offset aligned for this payload type. During an append-only
+        // upgrade, the old payload is smaller but the full new type fits the
+        // reserved capacity and is not accessed until the upgrade callback.
+        let mut shared_state = match unsafe {
+            SharedState::<InspectorSharedState>::from_region(
+                view.payload_offset,
+                view.current_payload_size,
+                view.payload_capacity,
+                view.upgrade_required,
+            )
+        } {
+            Ok(state) => state,
+            Err(error) => {
+                log::error!("invalid Inspector shared-state view: {}", error);
+                return false;
+            }
+        };
+        if view.is_new {
+            let mut initial_state = InspectorSharedState::default();
+            initial_state.next_sequence = 1;
+            // SAFETY: This is a newly allocated region and this instance is the
+            // first plugin runtime attached to it.
+            unsafe { shared_state.with_mut(|state| *state = initial_state) };
+        }
+
         let mut config = InspectorConfig {
             delay_scale: DelayScale::new(tsc_frequency),
+            shared_state: Some(shared_state),
+            pending_upgrade,
             ..InspectorConfig::default()
         };
         for (key, value) in data {
@@ -338,71 +388,33 @@ impl Guest for InspectorEngine {
         true
     }
 
-    fn save_state() -> Result<Vec<u8>, String> {
+    fn upgrade_shared_state(
+        source_schema_version: u32,
+        source_payload_size: u32,
+    ) -> Result<(), String> {
         let config = CONFIG.borrow();
-        let state = InspectorState {
-            magic: INSPECTOR_STATE_MAGIC,
-            version: INSPECTOR_STATE_VERSION,
-            bypass: config.bypass,
-            packets_inspected: config.packets_inspected,
-            bytes_inspected: config.bytes_inspected,
-            unexpected: config.unexpected,
-            delay_samples: config.delay_samples,
-            delay_sum_us: config.delay_sum_us,
-            delay_histogram: config.delay_histogram.to_vec(),
-            next_sequence: config.next_sequence,
-            sequence_packets: config.sequence_packets,
-            sequence_missing: config.sequence_missing,
-            sequence_out_of_sequence: config.sequence_out_of_sequence,
-            sequence_malformed: config.sequence_malformed,
-            logged_sequence_missing: config.logged_sequence_missing,
-            logged_sequence_out_of_sequence: config.logged_sequence_out_of_sequence,
-            logged_sequence_malformed: config.logged_sequence_malformed,
-        };
-        postcard::to_allocvec(&state)
-            .map_err(|error| alloc::format!("serialize inspector state: {error}"))
-    }
-
-    fn restore_state(state: Vec<u8>) -> Result<(), String> {
-        if state.is_empty() {
-            return Ok(());
-        }
-        let state: InspectorState = postcard::from_bytes(&state)
-            .map_err(|error| alloc::format!("decode inspector state: {error}"))?;
-        if state.magic != INSPECTOR_STATE_MAGIC || state.version != INSPECTOR_STATE_VERSION {
-            return Err(String::from("unsupported inspector state format"));
-        }
-        if state.delay_histogram.len() != INSPECTOR_DELAY_HISTOGRAM_BUCKETS {
+        if config.pending_upgrade != Some((source_schema_version, source_payload_size)) {
             return Err(String::from(
-                "inspector histogram has an incompatible bucket count",
+                "Inspector shared-state upgrade does not match the attached source schema",
             ));
         }
-
-        let mut config = CONFIG.borrow_mut();
-        config.bypass = state.bypass;
-        config.packets_inspected = state.packets_inspected;
-        config.bytes_inspected = state.bytes_inspected;
-        config.unexpected = state.unexpected;
-        config.delay_samples = state.delay_samples;
-        config.delay_sum_us = state.delay_sum_us;
-        config
-            .delay_histogram
-            .copy_from_slice(&state.delay_histogram);
-        config.next_sequence = state.next_sequence;
-        config.sequence_packets = state.sequence_packets;
-        config.sequence_missing = state.sequence_missing;
-        config.sequence_out_of_sequence = state.sequence_out_of_sequence;
-        config.sequence_malformed = state.sequence_malformed;
-        config.logged_sequence_missing = state.logged_sequence_missing;
-        config.logged_sequence_out_of_sequence = state.logged_sequence_out_of_sequence;
-        config.logged_sequence_malformed = state.logged_sequence_malformed;
-        Ok(())
+        Err(alloc::format!(
+            "Inspector has no append-only migration from schema {source_schema_version}"
+        ))
     }
 
     fn process_batch(batch_size: u32, umem_offset: u32, mailbox_offset: u32) -> u32 {
         let mut batch = MailboxBatch::new(batch_size, umem_offset, mailbox_offset);
-        let mut config = CONFIG.borrow_mut();
-        let bypass = config.bypass;
+        let config = CONFIG.borrow_mut();
+        let shared_state_ptr = match config.shared_state.as_ref() {
+            Some(shared_state) => shared_state.as_ptr(),
+            None => return u32::MAX,
+        };
+        // SAFETY: The runner invokes packet processing only on the active
+        // instance; staged replacements do not process until the old instance
+        // has stopped accessing this shared payload.
+        let state = unsafe { &mut *shared_state_ptr };
+        let bypass = state.bypass != 0;
         let delay_scale = config.delay_scale;
         let mut processed = 0;
 
@@ -413,8 +425,8 @@ impl Guest for InspectorEngine {
             }
 
             if !bypass {
-                config.packets_inspected += 1;
-                config.bytes_inspected += packet.data_len() as u64;
+                state.packets_inspected += 1;
+                state.bytes_inspected += packet.data_len() as u64;
 
                 let metadata = if packet.udp_header().is_some() {
                     packet.payload().map(parse_generated_udp_payload)
@@ -423,11 +435,11 @@ impl Guest for InspectorEngine {
                 };
                 let metadata = match metadata {
                     Some(Ok(Some(metadata))) => {
-                        record_sequence(&mut config, metadata.sequence);
+                        record_sequence(state, metadata.sequence);
                         Some(metadata)
                     }
                     Some(Err(())) => {
-                        config.sequence_malformed = config.sequence_malformed.saturating_add(1);
+                        state.sequence_malformed = state.sequence_malformed.saturating_add(1);
                         None
                     }
                     Some(Ok(None)) | None => None,
@@ -437,18 +449,18 @@ impl Guest for InspectorEngine {
                     packet_delay_us(packet.timestamp(), metadata.send_tsc, delay_scale)
                 }) {
                     Some(delay_us) => {
-                        config.delay_samples += 1;
-                        config.delay_sum_us = config.delay_sum_us.saturating_add(delay_us);
+                        state.delay_samples += 1;
+                        state.delay_sum_us = state.delay_sum_us.saturating_add(delay_us);
                         // Prometheus bounds are inclusive (le=10us), so a
                         // sample exactly on a boundary belongs in that bucket.
                         let bucket = (delay_us.saturating_sub(1)
                             / INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US)
                             .min(INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS as u64)
                             as usize;
-                        config.delay_histogram[bucket] =
-                            config.delay_histogram[bucket].saturating_add(1);
+                        state.delay_histogram[bucket] =
+                            state.delay_histogram[bucket].saturating_add(1);
                     }
-                    None => config.unexpected += 1,
+                    None => state.unexpected += 1,
                 }
 
                 packet.set_action(ROUTE_TX);
@@ -489,8 +501,7 @@ impl Guest for InspectorEngine {
     fn on_control_event(raw_opcode: u32, payload: Vec<u8>) -> bool {
         match PluginOpcode::from(raw_opcode) {
             PluginOpcode::Standard(StandardOpcode::SetOperationalState) if payload.len() == 1 => {
-                CONFIG.borrow_mut().bypass = payload[0] == 2;
-                true
+                set_shared_bypass(payload[0] == 2)
             }
             PluginOpcode::Standard(StandardOpcode::UpdateConfiguration) => {
                 let Ok(data) = postcard::from_bytes::<HotWasmPayload>(&payload) else {
@@ -498,7 +509,7 @@ impl Guest for InspectorEngine {
                 };
 
                 if let Some(value) = data.updates.get("bypass") {
-                    CONFIG.borrow_mut().bypass = value == "true" || value == "1";
+                    return set_shared_bypass(value == "true" || value == "1");
                 }
                 true
             }
@@ -508,68 +519,75 @@ impl Guest for InspectorEngine {
 
     fn get_telemetry() -> Vec<TelemetryMetric> {
         let mut config = CONFIG.borrow_mut();
+        let Some(shared_state) = config.shared_state.as_mut() else {
+            return Vec::new();
+        };
+        // SAFETY: Telemetry is polled by the active runtime at a runner
+        // boundary, with no staged runtime concurrently accessing the payload.
+        unsafe {
+            shared_state.with_mut(|state| {
+                let new_missing = state
+                    .sequence_missing
+                    .saturating_sub(state.logged_sequence_missing);
+                let new_out_of_sequence = state
+                    .sequence_out_of_sequence
+                    .saturating_sub(state.logged_sequence_out_of_sequence);
+                let new_malformed = state
+                    .sequence_malformed
+                    .saturating_sub(state.logged_sequence_malformed);
+                if new_missing > 0 || new_out_of_sequence > 0 || new_malformed > 0 {
+                    log::warn!(
+                        "UDP sequence anomalies since previous telemetry report: missing={}, out_of_sequence={}, malformed={} (totals: missing={}, out_of_sequence={}, malformed={})",
+                        new_missing,
+                        new_out_of_sequence,
+                        new_malformed,
+                        state.sequence_missing,
+                        state.sequence_out_of_sequence,
+                        state.sequence_malformed
+                    );
+                }
+                state.logged_sequence_missing = state.sequence_missing;
+                state.logged_sequence_out_of_sequence = state.sequence_out_of_sequence;
+                state.logged_sequence_malformed = state.sequence_malformed;
 
-        let new_missing = config
-            .sequence_missing
-            .saturating_sub(config.logged_sequence_missing);
-        let new_out_of_sequence = config
-            .sequence_out_of_sequence
-            .saturating_sub(config.logged_sequence_out_of_sequence);
-        let new_malformed = config
-            .sequence_malformed
-            .saturating_sub(config.logged_sequence_malformed);
-        if new_missing > 0 || new_out_of_sequence > 0 || new_malformed > 0 {
-            log::warn!(
-                "UDP sequence anomalies since previous telemetry report: missing={}, out_of_sequence={}, malformed={} (totals: missing={}, out_of_sequence={}, malformed={})",
-                new_missing,
-                new_out_of_sequence,
-                new_malformed,
-                config.sequence_missing,
-                config.sequence_out_of_sequence,
-                config.sequence_malformed
-            );
+                alloc::vec![
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("packets_inspected"),
+                        value: state.packets_inspected
+                    }),
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("bytes_inspected"),
+                        value: state.bytes_inspected
+                    }),
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("unexpected"),
+                        value: state.unexpected
+                    }),
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("sequence_packets"),
+                        value: state.sequence_packets
+                    }),
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("sequence_missing"),
+                        value: state.sequence_missing
+                    }),
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("sequence_out_of_sequence"),
+                        value: state.sequence_out_of_sequence
+                    }),
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("sequence_malformed"),
+                        value: state.sequence_malformed
+                    }),
+                    TelemetryMetric::Hist(Histogram {
+                        name: String::from("delay"),
+                        sum: state.delay_sum_us,
+                        count: state.delay_samples,
+                        buckets: state.delay_histogram.to_vec(),
+                    }),
+                ]
+            })
         }
-        config.logged_sequence_missing = config.sequence_missing;
-        config.logged_sequence_out_of_sequence = config.sequence_out_of_sequence;
-        config.logged_sequence_malformed = config.sequence_malformed;
-
-        let telemetry = alloc::vec![
-            TelemetryMetric::Counter(Counter {
-                name: String::from("packets_inspected"),
-                value: config.packets_inspected
-            }),
-            TelemetryMetric::Counter(Counter {
-                name: String::from("bytes_inspected"),
-                value: config.bytes_inspected
-            }),
-            TelemetryMetric::Counter(Counter {
-                name: String::from("unexpected"),
-                value: config.unexpected
-            }),
-            TelemetryMetric::Counter(Counter {
-                name: String::from("sequence_packets"),
-                value: config.sequence_packets
-            }),
-            TelemetryMetric::Counter(Counter {
-                name: String::from("sequence_missing"),
-                value: config.sequence_missing
-            }),
-            TelemetryMetric::Counter(Counter {
-                name: String::from("sequence_out_of_sequence"),
-                value: config.sequence_out_of_sequence
-            }),
-            TelemetryMetric::Counter(Counter {
-                name: String::from("sequence_malformed"),
-                value: config.sequence_malformed
-            }),
-            TelemetryMetric::Hist(Histogram {
-                name: String::from("delay"),
-                sum: config.delay_sum_us,
-                count: config.delay_samples,
-                buckets: config.delay_histogram.to_vec(),
-            }),
-        ];
-        telemetry
     }
 }
 
