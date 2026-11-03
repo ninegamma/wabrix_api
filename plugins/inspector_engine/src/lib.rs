@@ -22,6 +22,7 @@ use wabrix_api::{
 /// Histogram resolution and range shared by the inspector plugin and host.
 pub const INSPECTOR_DELAY_HISTOGRAM_BUCKET_WIDTH_US: u64 = 10;
 pub const INSPECTOR_DELAY_HISTOGRAM_FINITE_BUCKETS: usize = MAX_HISTOGRAM_BUCKETS -1;
+const MAX_DELAY_WINDOW_INTERVALS: usize = 5;
 
 wit_bindgen::generate!({
     path: "../../wit/wabrix.wit",
@@ -73,6 +74,10 @@ struct InspectorSharedState {
     delay_samples: u64,
     delay_sum_us: u64,
     delay_histogram: [u64; MAX_HISTOGRAM_BUCKETS],
+    // Peak in the current telemetry interval and the five latest interval peaks.
+    max_delay_current_interval_us: u64,
+    max_delay_intervals_us: [u64; MAX_DELAY_WINDOW_INTERVALS],
+    max_delay_interval_cursor: u8,
     // Next sequence expected, starting at 1.
     next_sequence: u64,
     // Count of marked UDP packets with a readable sequence.
@@ -100,6 +105,9 @@ impl Default for InspectorSharedState {
             delay_samples: 0,
             delay_sum_us: 0,
             delay_histogram: [0; MAX_HISTOGRAM_BUCKETS],
+            max_delay_current_interval_us: 0,
+            max_delay_intervals_us: [0; MAX_DELAY_WINDOW_INTERVALS],
+            max_delay_interval_cursor: 0,
             next_sequence: 0,
             sequence_packets: 0,
             sequence_missing: 0,
@@ -115,7 +123,7 @@ impl Default for InspectorSharedState {
 const INSPECTOR_SHARED_STATE_TYPE_ID: [u8; 16] = [
     0xf5, 0x7b, 0x87, 0x9a, 0x1c, 0xa2, 0x4e, 0xd9, 0xa9, 0x02, 0x7c, 0x2f, 0x8a, 0x5d, 0xb1, 0x34,
 ];
-const INSPECTOR_SHARED_STATE_SCHEMA_VERSION: u32 = 1;
+const INSPECTOR_SHARED_STATE_SCHEMA_VERSION: u32 = 2;
 
 impl Default for InspectorConfig {
     fn default() -> Self {
@@ -451,6 +459,9 @@ impl Guest for InspectorEngine {
                     Some(delay_us) => {
                         state.delay_samples += 1;
                         state.delay_sum_us = state.delay_sum_us.saturating_add(delay_us);
+                        if delay_us > state.max_delay_current_interval_us {
+                            state.max_delay_current_interval_us = delay_us;
+                        }
                         // Prometheus bounds are inclusive (le=10us), so a
                         // sample exactly on a boundary belongs in that bucket.
                         let bucket = (delay_us.saturating_sub(1)
@@ -550,6 +561,18 @@ impl Guest for InspectorEngine {
                 state.logged_sequence_out_of_sequence = state.sequence_out_of_sequence;
                 state.logged_sequence_malformed = state.sequence_malformed;
 
+                let interval = usize::from(state.max_delay_interval_cursor);
+                state.max_delay_intervals_us[interval] = state.max_delay_current_interval_us;
+                state.max_delay_current_interval_us = 0;
+                state.max_delay_interval_cursor =
+                    ((interval + 1) % MAX_DELAY_WINDOW_INTERVALS) as u8;
+                let max_delay_us_5s = state
+                    .max_delay_intervals_us
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+
                 alloc::vec![
                     TelemetryMetric::Counter(Counter {
                         name: String::from("packets_inspected"),
@@ -578,6 +601,10 @@ impl Guest for InspectorEngine {
                     TelemetryMetric::Counter(Counter {
                         name: String::from("sequence_malformed"),
                         value: state.sequence_malformed
+                    }),
+                    TelemetryMetric::Counter(Counter {
+                        name: String::from("max_delay_us_5s"),
+                        value: max_delay_us_5s
                     }),
                     TelemetryMetric::Hist(Histogram {
                         name: String::from("delay"),
