@@ -4,7 +4,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use exports::wabrix::plugins::packet_engine::{Counter, Guest, TelemetryMetric, TimerPlan};
+use exports::wabrix::plugins::packet_engine::{
+    Counter, Guest, TelemetryMetric, TelemetrySchema, TimerPlan,
+};
 use postcard;
 use wabrix::plugins::logging;
 use wabrix_api::mailbox_api::MailboxBatch;
@@ -211,6 +213,16 @@ impl Guest for FilterEngine {
                 }
             }
             _ => false,
+        }
+    }
+
+    fn get_telemetry_schema() -> TelemetrySchema {
+        TelemetrySchema {
+            counters: alloc::vec![
+                String::from("packets_forwarded"),
+                String::from("packets_dropped"),
+            ],
+            histograms: Vec::new(),
         }
     }
 

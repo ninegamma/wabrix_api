@@ -2,7 +2,9 @@
 
 extern crate alloc;
 
-use crate::exports::wabrix::plugins::packet_engine::{Counter, Guest, TelemetryMetric, TimerPlan};
+use crate::exports::wabrix::plugins::packet_engine::{
+    Counter, Guest, TelemetryMetric, TelemetrySchema, TimerPlan,
+};
 use crate::wabrix::plugins::logging;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -665,6 +667,17 @@ impl Guest for TcpEngine {
             }
         }
     }
+    fn get_telemetry_schema() -> TelemetrySchema {
+        TelemetrySchema {
+            counters: TCP_STAT_NAMES
+                .iter()
+                .map(|name| String::from(*name))
+                .chain(core::iter::once(String::from("watermark")))
+                .collect(),
+            histograms: Vec::new(),
+        }
+    }
+
     fn get_telemetry() -> Vec<TelemetryMetric> {
         let stats = TCP_STATS.borrow();
         let watermark = CONNECTIONS

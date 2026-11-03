@@ -10,7 +10,9 @@ use core::{mem::size_of, ptr};
 use macaddr::MacAddr6;
 use network_types::eth::EtherType;
 
-use crate::exports::wabrix::plugins::packet_engine::{Counter, Guest, TelemetryMetric, TimerPlan};
+use crate::exports::wabrix::plugins::packet_engine::{
+    Counter, Guest, TelemetryMetric, TelemetrySchema, TimerPlan,
+};
 use crate::wabrix::plugins::logging;
 use wabrix_api::connections::ConnectionPool;
 use wabrix_api::engine_common::{handle_control_event, ControlResult};
@@ -612,6 +614,18 @@ impl Guest for GeneratorEngine {
             ControlResult::Invalid => false,
         }
     }
+
+    fn get_telemetry_schema() -> TelemetrySchema {
+        TelemetrySchema {
+            counters: TCP_STAT_NAMES
+                .iter()
+                .map(|name| String::from(*name))
+                .chain(core::iter::once(String::from("watermark")))
+                .collect(),
+            histograms: Vec::new(),
+        }
+    }
+
     fn get_telemetry() -> Vec<TelemetryMetric> {
         let mut stats = TCP_STATS.borrow().to_vec();
         // Add current pool usage to stats

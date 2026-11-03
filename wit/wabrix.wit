@@ -1,4 +1,4 @@
-package wabrix:plugins@0.1.0;
+package wabrix:plugins@0.2.0;
     
 /// The interface for nodes that inspect and modify packets, e.g. running a TCP stack.
 interface packet-engine {
@@ -13,6 +13,18 @@ interface packet-engine {
     record counter {
         name: string,
         value: u64,
+    }
+
+    /// Declares the stable counter names emitted by a plugin instance.
+    record histogram-schema {
+        name: string,
+        bucket-count: u32,
+    }
+
+    /// Declares the telemetry storage required by a plugin instance.
+    record telemetry-schema {
+        counters: list<string>,
+        histograms: list<histogram-schema>,
     }
 
     /// A telemetry payload can contain ordinary counters and structured metrics.
@@ -48,6 +60,10 @@ interface packet-engine {
 
     // The universal control event receiver
     on-control-event: func(opcode: u32, payload: list<u8>) -> bool;
+
+    /// Describes the stable telemetry schema for this initialized instance.
+    /// Counter names and histogram definitions must match get-telemetry output.
+    get-telemetry-schema: func() -> telemetry-schema;
 
     /// Returns out-of-band telemetry. Counter entries retain their configured
     /// order; structured metrics may appear alongside them. An empty list

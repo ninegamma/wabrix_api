@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::cell::{Ref, RefCell, RefMut};
 
 use crate::exports::wabrix::plugins::packet_engine::{
-    Counter, Guest, Histogram, TelemetryMetric, TimerPlan,
+    Counter, Guest, Histogram, HistogramSchema, TelemetryMetric, TelemetrySchema, TimerPlan,
 };
 use crate::wabrix::plugins::logging;
 use crate::wabrix::plugins::shared_state::{self, StateLayout};
@@ -525,6 +525,25 @@ impl Guest for InspectorEngine {
                 true
             }
             _ => false,
+        }
+    }
+
+    fn get_telemetry_schema() -> TelemetrySchema {
+        TelemetrySchema {
+            counters: alloc::vec![
+                String::from("packets_inspected"),
+                String::from("bytes_inspected"),
+                String::from("unexpected"),
+                String::from("sequence_packets"),
+                String::from("sequence_missing"),
+                String::from("sequence_out_of_sequence"),
+                String::from("sequence_malformed"),
+                String::from("max_delay_us_5s"),
+            ],
+            histograms: alloc::vec![HistogramSchema {
+                name: String::from("delay"),
+                bucket_count: MAX_HISTOGRAM_BUCKETS as u32,
+            }],
         }
     }
 
