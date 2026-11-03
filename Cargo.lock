@@ -246,20 +246,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inspector_engine_new"
-version = "0.6.0"
-dependencies = [
- "log",
- "macaddr",
- "network-types",
- "postcard",
- "serde",
- "spin 0.10.0",
- "wabrix_api",
- "wit-bindgen",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

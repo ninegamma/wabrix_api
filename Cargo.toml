@@ -7,7 +7,7 @@ members = [
     "plugins/filter_engine",
     "plugins/generator_engine",
     "plugins/inspector_engine",
-    "plugins/inspector_engine_new",
+#    "plugins/inspector_engine_new",
 ]
 
 [workspace.package]
