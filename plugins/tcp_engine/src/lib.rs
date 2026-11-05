@@ -12,6 +12,7 @@ use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
 use wabrix_api::engine_common::{
     handle_control_event, parse_tcp_engine_config, ControlResult, WasmCell, WasmValue,
 };
+use wabrix_api::headers::tcp_flags;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::packet::Packet;
@@ -791,26 +792,26 @@ unsafe fn handle_tcp_packet(
         None => return (ROUTE_LINUX, packet.data_len()),
     };
 
-    let incoming_src_mac = mac_hdr.src.into_array();
-    let incoming_dst_mac = mac_hdr.dst.into_array();
+    let incoming_src_mac = mac_hdr.src_addr;
+    let incoming_dst_mac = mac_hdr.dst_addr;
 
-    let src_ip = ip_hdr.src();
-    let dst_ip = ip_hdr.dst();
-    let src_port = tcp_hdr.src_port();
-    let dst_port = tcp_hdr.dst_port();
+    let src_ip = u32::from(ip_hdr.src_addr());
+    let dst_ip = u32::from(ip_hdr.dst_addr());
+    let src_port = u16::from_be_bytes(tcp_hdr.source);
+    let dst_port = u16::from_be_bytes(tcp_hdr.dest);
     let flow_key = FlowKey(src_ip, src_port, dst_ip, dst_port);
     log::trace!(
         "handle_tcp_packet: processing packet with flow_key {:?}",
         flow_key
     );
 
-    let tcp_flags = tcp_hdr.flags();
-    let seq_num = tcp_hdr.seq_num();
-    let ack_num = tcp_hdr.ack_num();
+    let tcp_flags = tcp_flags(tcp_hdr);
+    let seq_num = u32::from_be_bytes(tcp_hdr.seq);
+    let ack_num = u32::from_be_bytes(tcp_hdr.ack_seq);
 
-    let ip_total_len = ip_hdr.length() as u32;
-    let ip_hdr_len = (ip_hdr.ihl() * 4) as u32;
-    let tcp_hdr_len = (tcp_hdr.data_offset() * 4) as u32;
+    let ip_total_len = ip_hdr.tot_len() as u32;
+    let ip_hdr_len = ip_hdr.ihl() as u32;
+    let tcp_hdr_len = tcp_hdr.doff() as u32 * 4;
     let payload_len = ip_total_len.saturating_sub(ip_hdr_len + tcp_hdr_len);
 
     let action_opt;

@@ -63,7 +63,7 @@ impl<T: Copy> SharedState<T> {
         }
 
         let alignment = align_of::<T>();
-        if alignment > 64 || (payload_offset as usize) % alignment != 0 {
+        if alignment > 64 || !(payload_offset as usize).is_multiple_of(alignment) {
             return Err(format!(
                 "shared-state payload offset {payload_offset} does not meet alignment {alignment}"
             ));

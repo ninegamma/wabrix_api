@@ -1,9 +1,10 @@
 use crate::headers::{
-    ArpIpv4Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader, TcpHeader, UdpHeader,
+    ArpHdr, EthHdr, HeaderKind, Icmpv4Hdr, Icmpv6Hdr, Ipv4Hdr, Ipv6Hdr, TcpHdr, UdpHdr,
 };
 use crate::hstack::HeaderStack;
 use crate::shared_memory::SharedPdu;
 use core::slice;
+use zerocopy::FromBytes;
 
 /// The safe, high-level interface for a single packet.
 pub struct Packet<'a> {
@@ -14,7 +15,7 @@ pub struct Packet<'a> {
 impl<'a> Packet<'a> {
     /// if headers().fingerprint() == TCP_OVER_IPV4 { ... }
     pub const TCP_OVER_IPV4: u32 =
-        (HeaderKind::Mac as u32) | ((HeaderKind::Ip as u32) << 4) | ((HeaderKind::Tcp as u32) << 8);
+        (HeaderKind::Eth as u32) | ((HeaderKind::Ip as u32) << 4) | ((HeaderKind::Tcp as u32) << 8);
 
     /// Internal constructor.
     #[inline(always)]
@@ -136,100 +137,101 @@ impl<'a> Packet<'a> {
         self.pdu.header_stack.fingerprint()
     }
 
+    #[inline]
+    fn header_data_offset(&self, kind: HeaderKind, from_end: bool) -> Option<usize> {
+        let stack = &self.pdu.header_stack;
+        let headroom = self.pdu.headroom();
+        let index = if from_end {
+            (0..stack.count()).rev().find(|&i| stack.kinds[i] == kind)
+        } else {
+            (0..stack.count()).find(|&i| stack.kinds[i] == kind)
+        }?;
+        (stack.offsets[index] as usize).checked_sub(headroom)
+    }
+
+    #[inline]
+    fn data_mut(&mut self) -> &mut [u8] {
+        let data_len = self.pdu.data_len() as usize;
+        let data_ptr = self.pdu.data_ptr(self.umem_base);
+        // SAFETY: As in `data()`, `data_ptr` points to the host-provided packet bytes and
+        // `data_len` is bounded by the frame. `&mut self` provides exclusive packet access.
+        unsafe { slice::from_raw_parts_mut(data_ptr, data_len) }
+    }
+
     // =================================================================
     // SAFE IMMUTABLE ACCESSORS
     // =================================================================
 
     /// Returns a typed reference to the TCP header if it exists
     #[inline]
-    pub fn tcp_header(&self) -> Option<&TcpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-
-        // Iterate backwards: L4 headers are usually at the top of the stack
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Tcp {
-                return Some(stack.tcp(base, i));
-            }
-        }
-        None
+    pub fn tcp_header(&self) -> Option<&TcpHdr> {
+        let offset = self.header_data_offset(HeaderKind::Tcp, true)?;
+        let end = offset.checked_add(TcpHdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        TcpHdr::ref_from_bytes(header_bytes).ok()
     }
 
     /// Returns a typed reference to the IPv4 header if it exists
     #[inline]
-    pub fn ipv4_header(&self) -> Option<&IpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ip {
-                return Some(stack.ip(base, i));
-            }
-        }
-        None
+    pub fn ipv4_header(&self) -> Option<&Ipv4Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Ip, false)?;
+        let end = offset.checked_add(Ipv4Hdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        Ipv4Hdr::ref_from_bytes(header_bytes).ok()
     }
 
     /// Returns a typed reference to the MAC header if it exists
     #[inline]
-    pub fn mac_header(&self) -> Option<&MacHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        for i in 0..self.pdu.header_stack.count() {
-            if self.pdu.header_stack.kinds[i] == HeaderKind::Mac {
-                return Some(self.pdu.header_stack.mac(base, i));
-            }
-        }
-        None
+    pub fn mac_header(&self) -> Option<&EthHdr> {
+        let offset = self.header_data_offset(HeaderKind::Eth, false)?;
+        let end = offset.checked_add(EthHdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        EthHdr::ref_from_bytes(header_bytes).ok()
     }
 
     /// Returns a typed reference to the UDP header if it exists
     #[inline]
-    pub fn udp_header(&self) -> Option<&UdpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        for i in (0..self.pdu.header_stack.count()).rev() {
-            if self.pdu.header_stack.kinds[i] == HeaderKind::Udp {
-                return Some(self.pdu.header_stack.udp(base, i));
-            }
-        }
-        None
+    pub fn udp_header(&self) -> Option<&UdpHdr> {
+        let offset = self.header_data_offset(HeaderKind::Udp, true)?;
+        let end = offset.checked_add(UdpHdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        UdpHdr::ref_from_bytes(header_bytes).ok()
     }
 
     /// Returns a typed reference to the ARP header if it exists
     #[inline]
-    pub fn arp_header(&self) -> Option<&ArpIpv4Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::ArpIpv4 {
-                return Some(stack.arp(base, i));
-            }
-        }
-        None
+    pub fn arp_header(&self) -> Option<&ArpHdr> {
+        let offset = self.header_data_offset(HeaderKind::ArpIpv4, false)?;
+        let end = offset.checked_add(ArpHdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        ArpHdr::ref_from_bytes(header_bytes).ok()
     }
 
     /// Returns a typed reference to the IPv6 header if it exists
     #[inline]
-    pub fn ipv6_header(&self) -> Option<&Ipv6Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ipv6 {
-                return Some(stack.ipv6(base, i));
-            }
-        }
-        None
+    pub fn ipv6_header(&self) -> Option<&Ipv6Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Ipv6, false)?;
+        let end = offset.checked_add(Ipv6Hdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        Ipv6Hdr::ref_from_bytes(header_bytes).ok()
     }
 
-    /// Returns a typed reference to the ICMP header if it exists
+    /// Returns a typed reference to the ICMPv4 header if it exists
     #[inline]
-    pub fn icmp_header(&self) -> Option<&IcmpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &self.pdu.header_stack;
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Icmp {
-                return Some(stack.icmp(base, i));
-            }
-        }
-        None
+    pub fn icmpv4_header(&self) -> Option<&Icmpv4Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Icmpv4, true)?;
+        let end = offset.checked_add(Icmpv4Hdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        Icmpv4Hdr::ref_from_bytes(header_bytes).ok()
+    }
+
+    /// Returns a typed reference to the ICMPv6 header if it exists
+    #[inline]
+    pub fn icmpv6_header(&self) -> Option<&Icmpv6Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Icmpv6, true)?;
+        let end = offset.checked_add(Icmpv6Hdr::LEN)?;
+        let header_bytes = self.data().get(offset..end)?;
+        Icmpv6Hdr::ref_from_bytes(header_bytes).ok()
     }
 
     // =================================================================
@@ -238,95 +240,74 @@ impl<'a> Packet<'a> {
 
     /// Returns a mutable typed reference to the TCP header
     #[inline]
-    pub fn tcp_header_mut(&mut self) -> Option<&mut TcpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Tcp {
-                return Some(stack.tcp_mut(base, i));
-            }
-        }
-        None
+    pub fn tcp_header_mut(&mut self) -> Option<&mut TcpHdr> {
+        let offset = self.header_data_offset(HeaderKind::Tcp, true)?;
+        let end = offset.checked_add(TcpHdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        TcpHdr::mut_from_bytes(header_bytes).ok()
     }
 
     /// Returns a mutable typed reference to the IPv4 header
     #[inline]
-    pub fn ipv4_header_mut(&mut self) -> Option<&mut IpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ip {
-                return Some(stack.ip_mut(base, i));
-            }
-        }
-        None
+    pub fn ipv4_header_mut(&mut self) -> Option<&mut Ipv4Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Ip, false)?;
+        let end = offset.checked_add(Ipv4Hdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        Ipv4Hdr::mut_from_bytes(header_bytes).ok()
     }
 
     /// Returns a mutable typed reference to the MAC header
     #[inline]
-    pub fn mac_header_mut(&mut self) -> Option<&mut MacHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Mac {
-                return Some(stack.mac_mut(base, i));
-            }
-        }
-        None
+    pub fn mac_header_mut(&mut self) -> Option<&mut EthHdr> {
+        let offset = self.header_data_offset(HeaderKind::Eth, false)?;
+        let end = offset.checked_add(EthHdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        EthHdr::mut_from_bytes(header_bytes).ok()
     }
 
     /// Returns a mutable typed reference to the ARP header
     #[inline]
-    pub fn arp_header_mut(&mut self) -> Option<&mut ArpIpv4Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::ArpIpv4 {
-                return Some(stack.arp_mut(base, i));
-            }
-        }
-        None
+    pub fn arp_header_mut(&mut self) -> Option<&mut ArpHdr> {
+        let offset = self.header_data_offset(HeaderKind::ArpIpv4, false)?;
+        let end = offset.checked_add(ArpHdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        ArpHdr::mut_from_bytes(header_bytes).ok()
     }
 
     /// Returns a mutable typed reference to the IPv6 header
     #[inline]
-    pub fn ipv6_header_mut(&mut self) -> Option<&mut Ipv6Header> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in 0..stack.count() {
-            if stack.kinds[i] == HeaderKind::Ipv6 {
-                return Some(stack.ipv6_mut(base, i));
-            }
-        }
-        None
+    pub fn ipv6_header_mut(&mut self) -> Option<&mut Ipv6Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Ipv6, false)?;
+        let end = offset.checked_add(Ipv6Hdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        Ipv6Hdr::mut_from_bytes(header_bytes).ok()
     }
 
     /// Returns a mutable typed reference to the UDP header
     #[inline]
-    pub fn udp_header_mut(&mut self) -> Option<&mut UdpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Udp {
-                return Some(stack.udp_mut(base, i));
-            }
-        }
-        None
+    pub fn udp_header_mut(&mut self) -> Option<&mut UdpHdr> {
+        let offset = self.header_data_offset(HeaderKind::Udp, true)?;
+        let end = offset.checked_add(UdpHdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        UdpHdr::mut_from_bytes(header_bytes).ok()
     }
 
-    /// Returns a mutable typed reference to the ICMP header
+    /// Returns a mutable typed reference to the ICMPv4 header
     #[inline]
-    pub fn icmp_header_mut(&mut self) -> Option<&mut IcmpHeader> {
-        let base = self.pdu.base_addr(self.umem_base);
-        let stack = &mut self.pdu.header_stack;
-        for i in (0..stack.count()).rev() {
-            if stack.kinds[i] == HeaderKind::Icmp {
-                return Some(stack.icmp_mut(base, i));
-            }
-        }
-        None
+    pub fn icmpv4_header_mut(&mut self) -> Option<&mut Icmpv4Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Icmpv4, true)?;
+        let end = offset.checked_add(Icmpv4Hdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        Icmpv4Hdr::mut_from_bytes(header_bytes).ok()
+    }
+
+    /// Returns a mutable typed reference to the ICMPv6 header
+    #[inline]
+    pub fn icmpv6_header_mut(&mut self) -> Option<&mut Icmpv6Hdr> {
+        let offset = self.header_data_offset(HeaderKind::Icmpv6, true)?;
+        let end = offset.checked_add(Icmpv6Hdr::LEN)?;
+        let header_bytes = self.data_mut().get_mut(offset..end)?;
+        Icmpv6Hdr::mut_from_bytes(header_bytes).ok()
     }
 
     #[inline]
@@ -339,13 +320,13 @@ impl<'a> Packet<'a> {
     #[inline(always)]
     pub fn write_tcp_ipv4_headers(
         &mut self,
-        mac: &MacHeader,
-        ip: &IpHeader,
-        tcp: &TcpHeader,
+        mac: &EthHdr,
+        ip: &Ipv4Hdr,
+        tcp: &TcpHdr,
     ) -> u32 {
-        let mac_len = core::mem::size_of::<MacHeader>();
-        let ip_len = core::mem::size_of::<IpHeader>();
-        let tcp_len = core::mem::size_of::<TcpHeader>();
+        let mac_len = EthHdr::LEN;
+        let ip_len = Ipv4Hdr::LEN;
+        let tcp_len = TcpHdr::LEN;
 
         let ptr = self.pdu.data_ptr(self.umem_base);
         // SAFETY: `ptr` points to the start of the frame's data region in WASM linear memory.
@@ -372,14 +353,14 @@ impl<'a> Packet<'a> {
     }
     /// Writes a MAC header to the start of the frame and updates the header stack.
     #[inline(always)]
-    pub fn write_mac_header(&mut self, mac: &MacHeader) -> u32 {
-        let mac_len = core::mem::size_of::<MacHeader>();
+    pub fn write_mac_header(&mut self, mac: &EthHdr) -> u32 {
+        let mac_len = EthHdr::LEN;
         let ptr = self.data_ptr_mut();
 
         // SAFETY: The frame size is pre-allocated and guaranteed to be larger than the MAC header.
         // `mac` is a valid reference on the caller's stack targeting a disjoint UMEM region.
         unsafe {
-            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut EthHdr, 1);
         }
 
         self.resize_payload(mac_len as u32);
@@ -387,7 +368,7 @@ impl<'a> Packet<'a> {
         let hr = self.headroom() as u16;
         let stack = &mut self.pdu.header_stack;
 
-        stack.kinds[0] = HeaderKind::Mac;
+        stack.kinds[0] = HeaderKind::Eth;
         stack.offsets[0] = hr;
 
         stack.hc = 1;
@@ -397,17 +378,17 @@ impl<'a> Packet<'a> {
 
     /// Writes MAC and IPv4 headers sequentially into the frame and updates the header stack.
     #[inline(always)]
-    pub fn write_mac_ipv4_headers(&mut self, mac: &MacHeader, ip: &IpHeader) -> u32 {
-        let mac_len = core::mem::size_of::<MacHeader>();
-        let ip_len = core::mem::size_of::<IpHeader>();
+    pub fn write_mac_ipv4_headers(&mut self, mac: &EthHdr, ip: &Ipv4Hdr) -> u32 {
+        let mac_len = EthHdr::LEN;
+        let ip_len = Ipv4Hdr::LEN;
 
         let ptr = self.data_ptr_mut();
 
         // SAFETY: Writes originate from stack-allocated structs and target disjoint UMEM regions.
         // The frame capacity is guaranteed to hold the combined headers.
         unsafe {
-            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
-            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut IpHeader, 1);
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut EthHdr, 1);
+            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut Ipv4Hdr, 1);
         }
 
         let total_len = (mac_len + ip_len) as u32;
@@ -416,7 +397,7 @@ impl<'a> Packet<'a> {
         let hr = self.headroom() as u16;
         let stack = &mut self.pdu.header_stack;
 
-        stack.kinds[0] = HeaderKind::Mac;
+        stack.kinds[0] = HeaderKind::Eth;
         stack.offsets[0] = hr;
 
         stack.kinds[1] = HeaderKind::Ip;
@@ -429,22 +410,22 @@ impl<'a> Packet<'a> {
     #[inline(always)]
     pub fn write_mac_ipv4_tcp_headers(
         &mut self,
-        mac: &MacHeader,
-        ip: &IpHeader,
-        tcp: &TcpHeader,
+        mac: &EthHdr,
+        ip: &Ipv4Hdr,
+        tcp: &TcpHdr,
     ) -> u32 {
-        let mac_len = core::mem::size_of::<MacHeader>();
-        let ip_len = core::mem::size_of::<IpHeader>();
-        let tcp_len = core::mem::size_of::<TcpHeader>();
+        let mac_len = EthHdr::LEN;
+        let ip_len = Ipv4Hdr::LEN;
+        let tcp_len = TcpHdr::LEN;
 
         let ptr = self.data_ptr_mut();
 
         // SAFETY: Writes originate from stack-allocated structs and target disjoint UMEM regions.
         // The frame capacity is guaranteed to hold the combined headers.
         unsafe {
-            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
-            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut IpHeader, 1);
-            core::ptr::copy_nonoverlapping(tcp, ptr.add(mac_len + ip_len) as *mut TcpHeader, 1);
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut EthHdr, 1);
+            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut Ipv4Hdr, 1);
+            core::ptr::copy_nonoverlapping(tcp, ptr.add(mac_len + ip_len) as *mut TcpHdr, 1);
         }
 
         let total_len = (mac_len + ip_len + tcp_len) as u32;
@@ -453,7 +434,7 @@ impl<'a> Packet<'a> {
         let hr = self.headroom() as u16;
         let stack = &mut self.pdu.header_stack;
 
-        stack.kinds[0] = HeaderKind::Mac;
+        stack.kinds[0] = HeaderKind::Eth;
         stack.offsets[0] = hr;
 
         stack.kinds[1] = HeaderKind::Ip;
@@ -470,21 +451,21 @@ impl<'a> Packet<'a> {
     #[inline(always)]
     pub fn write_mac_ipv4_udp_headers(
         &mut self,
-        mac: &MacHeader,
-        ip: &IpHeader,
-        udp: &UdpHeader,
+        mac: &EthHdr,
+        ip: &Ipv4Hdr,
+        udp: &UdpHdr,
     ) -> u32 {
-        let mac_len = core::mem::size_of::<MacHeader>();
-        let ip_len = core::mem::size_of::<IpHeader>();
-        let udp_len = core::mem::size_of::<UdpHeader>();
+        let mac_len = EthHdr::LEN;
+        let ip_len = Ipv4Hdr::LEN;
+        let udp_len = core::mem::size_of::<UdpHdr>();
 
         let ptr = self.data_ptr_mut();
 
         // SAFETY: Operations write sequentially into the exclusively owned UMEM frame.
         unsafe {
-            core::ptr::copy_nonoverlapping(mac, ptr as *mut MacHeader, 1);
-            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut IpHeader, 1);
-            core::ptr::copy_nonoverlapping(udp, ptr.add(mac_len + ip_len) as *mut UdpHeader, 1);
+            core::ptr::copy_nonoverlapping(mac, ptr as *mut EthHdr, 1);
+            core::ptr::copy_nonoverlapping(ip, ptr.add(mac_len) as *mut Ipv4Hdr, 1);
+            core::ptr::copy_nonoverlapping(udp, ptr.add(mac_len + ip_len) as *mut UdpHdr, 1);
         }
 
         let total_len = (mac_len + ip_len + udp_len) as u32;
@@ -493,7 +474,7 @@ impl<'a> Packet<'a> {
         let hr = self.headroom() as u16;
         let stack = &mut self.pdu.header_stack;
 
-        stack.kinds[0] = HeaderKind::Mac;
+        stack.kinds[0] = HeaderKind::Eth;
         stack.offsets[0] = hr;
 
         stack.kinds[1] = HeaderKind::Ip;

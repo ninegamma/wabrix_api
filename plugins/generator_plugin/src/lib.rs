@@ -6,10 +6,10 @@ use crate::exports::wabrix::plugins::generator::Guest;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use core::sync::atomic::{AtomicU32, Ordering};
-use macaddr::MacAddr6;
 use network_types::eth::EtherType;
+use network_types::ip::IpProto;
 use spin::Mutex; // <-- idiomatic no_std lock
-use wabrix_api::headers::{IpHeader, MacHeader, TcpHeader};
+use wabrix_api::headers::{new_ipv4_header, new_tcp_header, EthHdr, Ipv4Hdr};
 use wabrix_api::helpers::{parse_ip, parse_mac};
 use wabrix_api::packet::PacketBatch;
 
@@ -125,8 +125,8 @@ impl Guest for MyGenerator {
         let mut config = CONFIG.lock().clone().unwrap_or_default();
 
         // Pre-calculate static fields outside the loop for maximum performance
-        let dst_mac = MacAddr6::from(config.dst_mac.unwrap_or([0xff; 6]));
-        let src_mac = MacAddr6::from(config.src_mac.unwrap_or([1, 2, 3, 4, 5, 6]));
+        let dst_mac = config.dst_mac.unwrap_or([0xff; 6]);
+        let src_mac = config.src_mac.unwrap_or([1, 2, 3, 4, 5, 6]);
         let dst_ip = Ipv4Addr::from(config.dst_ip.unwrap_or([192, 168, 177, 222]));
         let base_src_ip = config.src_ip.unwrap_or([192, 168, 177, 2]);
 
@@ -142,30 +142,26 @@ impl Guest for MyGenerator {
                     u32::from_be_bytes(base_src_ip)
                 };
 
-                // 2. Build MacHeader
-                let mut mac = MacHeader::new();
-                mac.src = src_mac;
-                mac.dst = dst_mac;
-                mac.set_ethertype(EtherType::Ipv4);
+                // 2. Build the Ethernet header
+                let mac = EthHdr::new(dst_mac, src_mac, EtherType::Ipv4);
 
-                // 3. Build IpHeader
-                let mut ip = IpHeader::new();
-                ip.set_src(src_ip_u32);
-                ip.set_dst_address(dst_ip);
-                ip.set_ttl(128);
-                ip.set_version(4);
-                ip.set_protocol(6); // TCP
-                ip.set_ihl(5);
-                ip.set_length(40);
-                ip.set_flags(0x2); // DF=1
+                // 3. Build the IPv4 header
+                let mut ip = new_ipv4_header();
+                ip.set_src_addr(Ipv4Addr::from(src_ip_u32));
+                ip.set_dst_addr(dst_ip);
+                ip.ttl = 128;
+                ip.set_vihl(4, Ipv4Hdr::LEN as u8);
+                ip.set_proto(IpProto::Tcp);
+                ip.set_tot_len(40);
+                ip.set_frags(0x2, 0); // DF=1
 
-                // 4. Build TcpHeader
-                let mut tcp = TcpHeader::new();
-                tcp.set_syn_flag();
-                tcp.set_src_port(111);
-                tcp.set_dst_port(worker_id);
-                tcp.set_data_offset(5);
-                tcp.set_seq_num(seq);
+                // 4. Build the TCP header
+                let mut tcp = new_tcp_header();
+                tcp.set_syn(1);
+                tcp.source = 111u16.to_be_bytes();
+                tcp.dest = worker_id.to_be_bytes();
+                tcp.set_doff(5);
+                tcp.seq = seq.to_be_bytes();
 
                 // 5. Serialize directly into Wasm memory
                 let len = packet.write_mac_ipv4_tcp_headers(&mac, &ip, &tcp);

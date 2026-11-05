@@ -7,8 +7,9 @@ mod diagnostics;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::{mem::size_of, ptr};
-use macaddr::MacAddr6;
+use core::net::Ipv4Addr;
 use network_types::eth::EtherType;
+use network_types::ip::IpProto;
 
 use crate::exports::wabrix::plugins::packet_engine::{
     Counter, Guest, TelemetryMetric, TelemetrySchema, TimerPlan,
@@ -18,7 +19,9 @@ use wabrix_api::connections::ConnectionPool;
 use wabrix_api::engine_common::{handle_control_event, ControlResult};
 use wabrix_api::engine_common::{parse_generator_config, WasmCell, WasmValue};
 use wabrix_api::headers::check::{finalize_checksum, ipv4_checksum};
-use wabrix_api::headers::{IpHeader, MacHeader, UdpHeader};
+use wabrix_api::headers::{
+    new_ipv4_header, update_ipv4_checksum, EthHdr, Ipv4Hdr, UdpHdr,
+};
 use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
 use wabrix_api::{MAX_BATCH_SIZE, TIMER_KIND_TIMEOUT};
 
@@ -168,9 +171,9 @@ fn prepare_udp_packet(
 /// The UDP payload carries the host TSC snapshot, which is constant during a
 /// batch. The sequence number and source port change for each generated packet.
 struct UdpPacketTemplate {
-    mac: MacHeader,
-    ip: IpHeader,
-    udp: UdpHeader,
+    mac: EthHdr,
+    ip: Ipv4Hdr,
+    udp: UdpHdr,
     payload: [u8; UDP_SEQUENCE_OFFSET],
     checksum_without_dynamic_fields: u16,
 }
@@ -183,31 +186,32 @@ impl UdpPacketTemplate {
         let mut checksum_payload = [0u8; UDP_PAYLOAD_LEN];
         checksum_payload[..payload.len()].copy_from_slice(&payload);
 
-        let mut mac = MacHeader::new();
-        mac.src = MacAddr6::from(config.src_mac);
-        mac.dst = MacAddr6::from(config.dst_mac);
-        mac.set_ethertype(EtherType::Ipv4);
+        let mac = EthHdr::new(config.dst_mac, config.src_mac, EtherType::Ipv4);
 
-        let mut ip = IpHeader::new();
-        ip.set_src(config.src_ip);
-        ip.set_dst(config.dst_ip);
-        ip.set_ttl(64);
-        ip.set_version(4);
-        ip.set_protocol(17);
-        ip.set_ihl(5);
-        ip.set_length((size_of::<IpHeader>() + size_of::<UdpHeader>() + UDP_PAYLOAD_LEN) as u16);
-        ip.set_flags(0x2);
-        ip.update_checksum();
+        let mut ip = new_ipv4_header();
+        ip.set_src_addr(Ipv4Addr::from(config.src_ip));
+        ip.set_dst_addr(Ipv4Addr::from(config.dst_ip));
+        ip.ttl = 64;
+        ip.set_vihl(4, Ipv4Hdr::LEN as u8);
+        ip.set_proto(IpProto::Udp);
+        ip.set_tot_len((Ipv4Hdr::LEN + size_of::<UdpHdr>() + UDP_PAYLOAD_LEN) as u16);
+        ip.set_frags(0x2, 0);
+        update_ipv4_checksum(&mut ip);
 
-        let mut udp = UdpHeader::new();
+        let mut udp = UdpHdr {
+            src: [0; 2],
+            dst: [0; 2],
+            len: [0; 2],
+            check: [0; 2],
+        };
         udp.set_dst_port(80);
-        udp.set_length((size_of::<UdpHeader>() + UDP_PAYLOAD_LEN) as u16);
+        udp.set_len((size_of::<UdpHdr>() + UDP_PAYLOAD_LEN) as u16);
 
         // Compute the checksum once with a zero source port and sequence.
         // The changing source-port and sequence words are added per packet.
         let checksum_without_dynamic_fields = ipv4_checksum(
             (&raw mut udp).cast::<u8>(),
-            size_of::<UdpHeader>(),
+            size_of::<UdpHdr>(),
             3,
             &checksum_payload,
             config.src_ip,
@@ -225,7 +229,7 @@ impl UdpPacketTemplate {
     }
 
     #[inline(always)]
-    fn udp_header_for_packet(&self, src_port: u16, sequence: u64) -> UdpHeader {
+    fn udp_header_for_packet(&self, src_port: u16, sequence: u64) -> UdpHdr {
         let mut udp = self.udp;
         udp.set_src_port(src_port);
         let sequence_sum = ((sequence >> 48) as u16 as u32)
@@ -759,15 +763,15 @@ mod tests {
                 PORT_END_RANGE,
             ] {
                 let udp = template.udp_header_for_packet(port, sequence);
-                let mut full_datagram = [0u8; size_of::<UdpHeader>() + UDP_PAYLOAD_LEN];
+                let mut full_datagram = [0u8; size_of::<UdpHdr>() + UDP_PAYLOAD_LEN];
                 unsafe {
                     ptr::copy_nonoverlapping(
                         (&raw const udp).cast::<u8>(),
                         full_datagram.as_mut_ptr(),
-                        size_of::<UdpHeader>(),
+                        size_of::<UdpHdr>(),
                     );
                 }
-                full_datagram[size_of::<UdpHeader>()..].copy_from_slice(&payload);
+                full_datagram[size_of::<UdpHdr>()..].copy_from_slice(&payload);
                 let expected = ipv4_checksum(
                     full_datagram.as_mut_ptr(),
                     full_datagram.len(),

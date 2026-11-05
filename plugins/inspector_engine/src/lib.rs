@@ -167,10 +167,9 @@ impl DelayScale {
         let numerator = (1_000_000 / a) as u32;
         let denominator = frequency / a;
         if denominator <= u32::MAX as u64 {
-            let denominator_reciprocal = if denominator == 0 {
-                0
-            } else {
-                (u32::MAX as u64 + 1) / denominator
+            let denominator_reciprocal = match (u32::MAX as u64 + 1).checked_div(denominator) {
+                Some(reciprocal) => reciprocal,
+                None => 0,
             };
             Self {
                 frequency,
@@ -371,8 +370,10 @@ impl Guest for InspectorEngine {
             }
         };
         if view.is_new {
-            let mut initial_state = InspectorSharedState::default();
-            initial_state.next_sequence = 1;
+            let initial_state = InspectorSharedState {
+                next_sequence: 1,
+                ..InspectorSharedState::default()
+            };
             // SAFETY: This is a newly allocated region and this instance is the
             // first plugin runtime attached to it.
             unsafe { shared_state.with_mut(|state| *state = initial_state) };

@@ -24,13 +24,14 @@ mod udp;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeaderKind {
     Null = 0,
-    Mac,
+    Eth,
     ArpIpv4,
     Ip,
     Ipv6,
     Tcp,
     Udp,
-    Icmp,
+    Icmpv4 = 7,
+    Icmpv6 = 8,
 }
 
 /// A trait implemented by all headers, used for reading them from a frame.
@@ -52,13 +53,14 @@ pub trait EndOffset: Send {
 #[derive(Debug)]
 pub enum HeaderPtr {
     Null,
-    Mac(*mut MacHeader),
-    ArpIpv4(*mut ArpIpv4Header),
-    Ip(*mut IpHeader),
-    Ipv6(*mut Ipv6Header),
-    Tcp(*mut TcpHeader),
-    Udp(*mut UdpHeader),
-    Icmp(*mut IcmpHeader),
+    Eth(*mut EthHdr),
+    ArpIpv4(*mut ArpHdr),
+    Ip(*mut Ipv4Hdr),
+    Ipv6(*mut Ipv6Hdr),
+    Tcp(*mut TcpHdr),
+    Udp(*mut UdpHdr),
+    Icmpv4(*mut Icmpv4Hdr),
+    Icmpv6(*mut Icmpv6Hdr),
 }
 
 // Keep initialization ergonomics
@@ -77,34 +79,34 @@ impl HeaderPtr {
 
     // Accessors create temporary borrows on demand (no persistent &mut stored).
     #[inline]
-    pub fn as_mac_mut(&mut self) -> Option<&mut MacHeader> {
+    pub fn as_eth_mut(&mut self) -> Option<&mut EthHdr> {
         match self {
-            // SAFETY: `p` was stored by `new()` from a live `*mut MacHeader` into valid UMEM
+            // SAFETY: `p` was stored by `new()` from a live `*mut EthHdr` into valid UMEM
             // memory. `&mut self` prevents any aliased mutable borrow of the same slot.
-            HeaderPtr::Mac(p) => Some(unsafe { &mut **p }),
+            HeaderPtr::Eth(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
     }
     #[inline]
-    pub fn as_mac(&self) -> Option<&MacHeader> {
+    pub fn as_eth(&self) -> Option<&EthHdr> {
         match self {
             // SAFETY: Same pointer invariant as `as_mac_mut`; `&self` prevents concurrent
             // mutable access.
-            HeaderPtr::Mac(p) => Some(unsafe { &**p }),
+            HeaderPtr::Eth(p) => Some(unsafe { &**p }),
             _ => None,
         }
     }
     // ArpIpv4 accessors
     #[inline]
-    pub fn as_arpipv4_mut(&mut self) -> Option<&mut ArpIpv4Header> {
+    pub fn as_arpipv4_mut(&mut self) -> Option<&mut ArpHdr> {
         match self {
-            // SAFETY: `p` is a valid `*mut ArpIpv4Header` from UMEM; `&mut self` prevents aliasing.
+            // SAFETY: `p` is a valid `*mut ArpHdr` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::ArpIpv4(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
     }
     #[inline]
-    pub fn as_arpipv4(&self) -> Option<&ArpIpv4Header> {
+    pub fn as_arpipv4(&self) -> Option<&ArpHdr> {
         match self {
             // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::ArpIpv4(p) => Some(unsafe { &**p }),
@@ -114,15 +116,15 @@ impl HeaderPtr {
 
     // Ip accessors
     #[inline]
-    pub fn as_ip_mut(&mut self) -> Option<&mut IpHeader> {
+    pub fn as_ip_mut(&mut self) -> Option<&mut Ipv4Hdr> {
         match self {
-            // SAFETY: `p` is a valid `*mut IpHeader` from UMEM; `&mut self` prevents aliasing.
+            // SAFETY: `p` is a valid `*mut Ipv4Hdr` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Ip(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
     }
     #[inline]
-    pub fn as_ip(&self) -> Option<&IpHeader> {
+    pub fn as_ip(&self) -> Option<&Ipv4Hdr> {
         match self {
             // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Ip(p) => Some(unsafe { &**p }),
@@ -132,15 +134,15 @@ impl HeaderPtr {
 
     // Ipv6 accessors
     #[inline]
-    pub fn as_ipv6_mut(&mut self) -> Option<&mut Ipv6Header> {
+    pub fn as_ipv6_mut(&mut self) -> Option<&mut Ipv6Hdr> {
         match self {
-            // SAFETY: `p` is a valid `*mut Ipv6Header` from UMEM; `&mut self` prevents aliasing.
+            // SAFETY: `p` is a valid `*mut Ipv6Hdr` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Ipv6(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
     }
     #[inline]
-    pub fn as_ipv6(&self) -> Option<&Ipv6Header> {
+    pub fn as_ipv6(&self) -> Option<&Ipv6Hdr> {
         match self {
             // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Ipv6(p) => Some(unsafe { &**p }),
@@ -150,15 +152,15 @@ impl HeaderPtr {
 
     // Tcp accessors
     #[inline]
-    pub fn as_tcp_mut(&mut self) -> Option<&mut TcpHeader> {
+    pub fn as_tcp_mut(&mut self) -> Option<&mut TcpHdr> {
         match self {
-            // SAFETY: `p` is a valid `*mut TcpHeader` from UMEM; `&mut self` prevents aliasing.
+            // SAFETY: `p` is a valid `*mut TcpHdr` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Tcp(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
     }
     #[inline]
-    pub fn as_tcp(&self) -> Option<&TcpHeader> {
+    pub fn as_tcp(&self) -> Option<&TcpHdr> {
         match self {
             // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Tcp(p) => Some(unsafe { &**p }),
@@ -168,15 +170,15 @@ impl HeaderPtr {
 
     // Udp accessors
     #[inline]
-    pub fn as_udp_mut(&mut self) -> Option<&mut UdpHeader> {
+    pub fn as_udp_mut(&mut self) -> Option<&mut UdpHdr> {
         match self {
-            // SAFETY: `p` is a valid `*mut UdpHeader` from UMEM; `&mut self` prevents aliasing.
+            // SAFETY: `p` is a valid `*mut UdpHdr` from UMEM; `&mut self` prevents aliasing.
             HeaderPtr::Udp(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
     }
     #[inline]
-    pub fn as_udp(&self) -> Option<&UdpHeader> {
+    pub fn as_udp(&self) -> Option<&UdpHdr> {
         match self {
             // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
             HeaderPtr::Udp(p) => Some(unsafe { &**p }),
@@ -184,20 +186,38 @@ impl HeaderPtr {
         }
     }
 
-    // Icmp accessors
+    // ICMPv4 accessors
     #[inline]
-    pub fn as_icmp_mut(&mut self) -> Option<&mut IcmpHeader> {
+    pub fn as_icmpv4_mut(&mut self) -> Option<&mut Icmpv4Hdr> {
         match self {
-            // SAFETY: `p` is a valid `*mut IcmpHeader` from UMEM; `&mut self` prevents aliasing.
-            HeaderPtr::Icmp(p) => Some(unsafe { &mut **p }),
+            // SAFETY: `p` is a valid `*mut Icmpv4Hdr` from UMEM; `&mut self` prevents aliasing.
+            HeaderPtr::Icmpv4(p) => Some(unsafe { &mut **p }),
             _ => None,
         }
     }
     #[inline]
-    pub fn as_icmp(&self) -> Option<&IcmpHeader> {
+    pub fn as_icmpv4(&self) -> Option<&Icmpv4Hdr> {
         match self {
             // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
-            HeaderPtr::Icmp(p) => Some(unsafe { &**p }),
+            HeaderPtr::Icmpv4(p) => Some(unsafe { &**p }),
+            _ => None,
+        }
+    }
+
+    // ICMPv6 accessors
+    #[inline]
+    pub fn as_icmpv6_mut(&mut self) -> Option<&mut Icmpv6Hdr> {
+        match self {
+            // SAFETY: `p` is a valid `*mut Icmpv6Hdr` from UMEM; `&mut self` prevents aliasing.
+            HeaderPtr::Icmpv6(p) => Some(unsafe { &mut **p }),
+            _ => None,
+        }
+    }
+    #[inline]
+    pub fn as_icmpv6(&self) -> Option<&Icmpv6Hdr> {
+        match self {
+            // SAFETY: Same pointer invariant; `&self` prevents concurrent mutation.
+            HeaderPtr::Icmpv6(p) => Some(unsafe { &**p }),
             _ => None,
         }
     }
@@ -206,13 +226,14 @@ impl HeaderPtr {
     pub fn kind(&self) -> HeaderKind {
         match self {
             HeaderPtr::Null => HeaderKind::Null,
-            HeaderPtr::Mac(_) => HeaderKind::Mac,
+            HeaderPtr::Eth(_) => HeaderKind::Eth,
             HeaderPtr::ArpIpv4(_) => HeaderKind::ArpIpv4,
             HeaderPtr::Ip(_) => HeaderKind::Ip,
             HeaderPtr::Ipv6(_) => HeaderKind::Ipv6,
             HeaderPtr::Tcp(_) => HeaderKind::Tcp,
             HeaderPtr::Udp(_) => HeaderKind::Udp,
-            HeaderPtr::Icmp(_) => HeaderKind::Icmp,
+            HeaderPtr::Icmpv4(_) => HeaderKind::Icmpv4,
+            HeaderPtr::Icmpv6(_) => HeaderKind::Icmpv6,
         }
     }
 
@@ -221,26 +242,28 @@ impl HeaderPtr {
     pub fn as_ptr_u8(&self) -> Option<*const u8> {
         match self {
             HeaderPtr::Null => None,
-            HeaderPtr::Mac(p) => Some(*p as *const u8),
+            HeaderPtr::Eth(p) => Some(*p as *const u8),
             HeaderPtr::ArpIpv4(p) => Some(*p as *const u8),
             HeaderPtr::Ip(p) => Some(*p as *const u8),
             HeaderPtr::Ipv6(p) => Some(*p as *const u8),
             HeaderPtr::Tcp(p) => Some(*p as *const u8),
             HeaderPtr::Udp(p) => Some(*p as *const u8),
-            HeaderPtr::Icmp(p) => Some(*p as *const u8),
+            HeaderPtr::Icmpv4(p) => Some(*p as *const u8),
+            HeaderPtr::Icmpv6(p) => Some(*p as *const u8),
         }
     }
     #[inline]
     pub fn as_ptr_u8_mut(&mut self) -> Option<*mut u8> {
         match self {
             HeaderPtr::Null => None,
-            HeaderPtr::Mac(p) => Some(*p as *mut u8),
+            HeaderPtr::Eth(p) => Some(*p as *mut u8),
             HeaderPtr::ArpIpv4(p) => Some(*p as *mut u8),
             HeaderPtr::Ip(p) => Some(*p as *mut u8),
             HeaderPtr::Ipv6(p) => Some(*p as *mut u8),
             HeaderPtr::Tcp(p) => Some(*p as *mut u8),
             HeaderPtr::Udp(p) => Some(*p as *mut u8),
-            HeaderPtr::Icmp(p) => Some(*p as *mut u8),
+            HeaderPtr::Icmpv4(p) => Some(*p as *mut u8),
+            HeaderPtr::Icmpv6(p) => Some(*p as *mut u8),
         }
     }
 
@@ -250,13 +273,14 @@ impl HeaderPtr {
     pub fn from_kind_and_ptr(kind: HeaderKind, ptr: *mut u8) -> Self {
         match kind {
             HeaderKind::Null => HeaderPtr::Null,
-            HeaderKind::Mac => HeaderPtr::Mac(ptr as *mut MacHeader),
-            HeaderKind::ArpIpv4 => HeaderPtr::ArpIpv4(ptr as *mut ArpIpv4Header),
-            HeaderKind::Ip => HeaderPtr::Ip(ptr as *mut IpHeader),
-            HeaderKind::Ipv6 => HeaderPtr::Ipv6(ptr as *mut Ipv6Header),
-            HeaderKind::Tcp => HeaderPtr::Tcp(ptr as *mut TcpHeader),
-            HeaderKind::Udp => HeaderPtr::Udp(ptr as *mut UdpHeader),
-            HeaderKind::Icmp => HeaderPtr::Icmp(ptr as *mut IcmpHeader),
+            HeaderKind::Eth => HeaderPtr::Eth(ptr as *mut EthHdr),
+            HeaderKind::ArpIpv4 => HeaderPtr::ArpIpv4(ptr as *mut ArpHdr),
+            HeaderKind::Ip => HeaderPtr::Ip(ptr as *mut Ipv4Hdr),
+            HeaderKind::Ipv6 => HeaderPtr::Ipv6(ptr as *mut Ipv6Hdr),
+            HeaderKind::Tcp => HeaderPtr::Tcp(ptr as *mut TcpHdr),
+            HeaderKind::Udp => HeaderPtr::Udp(ptr as *mut UdpHdr),
+            HeaderKind::Icmpv4 => HeaderPtr::Icmpv4(ptr as *mut Icmpv4Hdr),
+            HeaderKind::Icmpv6 => HeaderPtr::Icmpv6(ptr as *mut Icmpv6Hdr),
         }
     }
 }
@@ -268,12 +292,13 @@ impl HeaderPtr {
     pub fn offset(&self) -> Option<usize> {
         match self {
             Header::Null => None,
-            Header::Mac(_) => Some(self.as_mac().unwrap().offset()),
+            Header::Eth(_) => Some(self.as_eth().unwrap().offset()),
             Header::Ip(_) => Some(self.as_ip().unwrap().offset()),
             Header::Ipv6(_) => Some(self.as_ipv6().unwrap().offset()),
             Header::Tcp(_) => Some(self.as_tcp().unwrap().offset()),
             Header::Udp(_) => Some(self.as_udp().unwrap().offset()),
-            Header::Icmp(_) => Some(self.as_icmp().unwrap().offset()),
+            Header::Icmpv4(_) => Some(self.as_icmpv4().unwrap().offset()),
+            Header::Icmpv6(_) => Some(self.as_icmpv6().unwrap().offset()),
             Header::ArpIpv4(_) => Some(self.as_arpipv4().unwrap().offset()),
         }
     }
@@ -283,12 +308,13 @@ impl fmt::Display for HeaderPtr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             Header::Null => write!(f, "{:?}", self),
-            Header::Mac(_) => write!(f, "{:?}", self.as_mac().unwrap()),
-            Header::Ip(_) => write!(f, "{ }", self.as_ip().unwrap()),
-            Header::Ipv6(_) => write!(f, "{ }", self.as_ipv6().unwrap()),
-            Header::Tcp(_) => write!(f, "{ }", self.as_tcp().unwrap()),
+            Header::Eth(_) => write!(f, "{:?}", self.as_eth().unwrap()),
+            Header::Ip(_) => write!(f, "{:?}", self.as_ip().unwrap()),
+            Header::Ipv6(_) => write!(f, "{:?}", self.as_ipv6().unwrap()),
+            Header::Tcp(_) => write!(f, "{:?}", self.as_tcp().unwrap()),
             Header::Udp(_) => write!(f, "{:?}", self.as_udp().unwrap()),
-            Header::Icmp(_) => write!(f, "{ }", self.as_icmp().unwrap()),
+            Header::Icmpv4(_) => write!(f, "{:?}", self.as_icmpv4().unwrap()),
+            Header::Icmpv6(_) => write!(f, "{:?}", self.as_icmpv6().unwrap()),
             Header::ArpIpv4(_) => write!(f, "{:?}", self.as_arpipv4().unwrap()),
         }
     }
@@ -297,11 +323,11 @@ impl fmt::Display for HeaderPtr {
 #[test]
 
 fn test_headers() {
-    let mut ip_header = IpHeader::new();
+    let mut ip_header = new_ipv4_header();
     let header = Header::Ip(&mut ip_header);
     assert_eq!(header.kind(), HeaderKind::Ip);
     assert!(header.as_ip().is_some());
-    assert!(header.as_mac().is_none());
+    assert!(header.as_eth().is_none());
     assert!(header.as_tcp().is_none());
     assert!(header.as_udp().is_none());
 }

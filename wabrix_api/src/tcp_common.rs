@@ -1,16 +1,20 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::size_of;
+use core::net::Ipv4Addr;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
-use macaddr::MacAddr6;
 use network_types::eth::EtherType;
+use network_types::ip::IpProto;
 
 use crate::connections::{ConnectionNode, FlowKey, TcpState};
 use crate::headers::check::ipv4_checksum;
-use crate::headers::{IpHeader, MacHeader, TcpHeader, UdpHeader};
+use crate::headers::{
+    new_ipv4_header, new_tcp_header, set_tcp_flags, update_ipv4_checksum, EthHdr, Ipv4Hdr, UdpHdr,
+};
 use crate::helpers::update_tcp_checksum;
 use crate::packet::Packet;
+use zerocopy::IntoBytes;
 
 // Standard TCP Flags
 pub const FLAG_FIN: u8 = 0x01;
@@ -373,31 +377,27 @@ pub fn write_tcp_packet(
     ack_num: u32,
     flags: u8,
 ) -> u32 {
-    let mut mac = MacHeader::new();
-    mac.src = MacAddr6::from(src_mac);
-    mac.dst = MacAddr6::from(dst_mac);
-    mac.set_ethertype(EtherType::Ipv4);
+    let mac = EthHdr::new(dst_mac, src_mac, EtherType::Ipv4);
 
-    let mut ip = IpHeader::new();
-    ip.set_src(src_ip);
-    ip.set_dst(dst_ip);
-    ip.set_ttl(64);
-    ip.set_version(4);
-    ip.set_protocol(6);
-    ip.set_ihl(5);
-    ip.set_length(40);
-    ip.set_flags(0x2);
-    ip.update_checksum();
+    let mut ip = new_ipv4_header();
+    ip.set_src_addr(Ipv4Addr::from(src_ip));
+    ip.set_dst_addr(Ipv4Addr::from(dst_ip));
+    ip.ttl = 64;
+    ip.set_vihl(4, Ipv4Hdr::LEN as u8);
+    ip.set_proto(IpProto::Tcp);
+    ip.set_tot_len(40);
+    ip.set_frags(0x2, 0);
+    update_ipv4_checksum(&mut ip);
 
-    let mut tcp = TcpHeader::new();
-    tcp.set_flags(flags);
-    tcp.set_src_port(src_port);
-    tcp.set_dst_port(dst_port);
-    tcp.set_data_offset(5);
-    tcp.set_seq_num(seq_num);
-    tcp.set_ack_num(ack_num);
-    tcp.set_window_size(64240);
-    update_tcp_checksum(&mut tcp, 20, src_ip, dst_ip);
+    let mut tcp = new_tcp_header();
+    set_tcp_flags(&mut tcp, flags);
+    tcp.source = src_port.to_be_bytes();
+    tcp.dest = dst_port.to_be_bytes();
+    tcp.set_doff(5);
+    tcp.seq = seq_num.to_be_bytes();
+    tcp.ack_seq = ack_num.to_be_bytes();
+    tcp.window = 64240u16.to_be_bytes();
+    update_tcp_checksum(tcp.as_mut_bytes(), src_ip, dst_ip);
 
     packet.write_mac_ipv4_tcp_headers(&mac, &ip, &tcp)
 }
@@ -415,33 +415,34 @@ pub fn write_udp_packet(
     dst_port: u16,
     payload: &[u8],
 ) -> u32 {
-    let mac_size = size_of::<MacHeader>();
-    let ip_size = size_of::<IpHeader>();
-    let udp_size = size_of::<UdpHeader>();
+    let mac_size = EthHdr::LEN;
+    let ip_size = Ipv4Hdr::LEN;
+    let udp_size = size_of::<UdpHdr>();
 
     let udp_len = (udp_size + payload.len()) as u16;
     let ip_len = (ip_size + udp_len as usize) as u16;
 
-    let mut mac = MacHeader::new();
-    mac.src = MacAddr6::from(src_mac);
-    mac.dst = MacAddr6::from(dst_mac);
-    mac.set_ethertype(EtherType::Ipv4);
+    let mac = EthHdr::new(dst_mac, src_mac, EtherType::Ipv4);
 
-    let mut ip = IpHeader::new();
-    ip.set_src(src_ip);
-    ip.set_dst(dst_ip);
-    ip.set_ttl(64);
-    ip.set_version(4);
-    ip.set_protocol(17);
-    ip.set_ihl(5);
-    ip.set_length(ip_len);
-    ip.set_flags(0x2);
-    ip.update_checksum();
+    let mut ip = new_ipv4_header();
+    ip.set_src_addr(Ipv4Addr::from(src_ip));
+    ip.set_dst_addr(Ipv4Addr::from(dst_ip));
+    ip.ttl = 64;
+    ip.set_vihl(4, Ipv4Hdr::LEN as u8);
+    ip.set_proto(IpProto::Udp);
+    ip.set_tot_len(ip_len);
+    ip.set_frags(0x2, 0);
+    update_ipv4_checksum(&mut ip);
 
-    let mut udp = UdpHeader::new();
+    let mut udp = UdpHdr {
+        src: [0; 2],
+        dst: [0; 2],
+        len: [0; 2],
+        check: [0; 2],
+    };
     udp.set_src_port(src_port);
     udp.set_dst_port(dst_port);
-    udp.set_length(udp_len);
+    udp.set_len(udp_len);
 
     let header_len = packet.write_mac_ipv4_udp_headers(&mac, &ip, &udp);
     let udp_ptr = unsafe { packet.data_ptr_mut().add(mac_size + ip_size) };
@@ -454,7 +455,7 @@ pub fn write_udp_packet(
 
     let checksum = ipv4_checksum(udp_ptr, udp_len as usize, 3, &[], src_ip, dst_ip, 17);
     unsafe {
-        (*(udp_ptr as *mut UdpHeader)).set_checksum(checksum);
+        (*(udp_ptr as *mut UdpHdr)).set_checksum(checksum);
     }
 
     let packet_len = (mac_size + ip_size + udp_len as usize) as u32;

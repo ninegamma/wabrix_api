@@ -111,7 +111,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "filter_engine"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "hashbrown 0.17.1",
  "log",
@@ -134,7 +134,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "generator_engine"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "log",
  "macaddr",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "generator_plugin"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "macaddr",
  "network-types",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "inspector_engine"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "log",
  "macaddr",
@@ -290,12 +290,11 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "network-types"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b2a639fbb002e28c2db28571f31aacc167fe7b36b33eaf650412b8d5efff26a"
 dependencies = [
  "num-derive",
  "num-traits",
  "wincode",
+ "zerocopy",
 ]
 
 [[package]]
@@ -483,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "tcp_engine"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "log",
  "macaddr",
@@ -528,7 +527,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "wabrix_api"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -539,6 +538,7 @@ dependencies = [
  "network-types",
  "postcard",
  "serde",
+ "zerocopy",
 ]
 
 [[package]]
@@ -688,6 +688,24 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.63"
+source = "git+https://github.com/google/zerocopy#f61435de34bb62c67497bb3510225c5bc5f659be"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.63"
+source = "git+https://github.com/google/zerocopy#f61435de34bb62c67497bb3510225c5bc5f659be"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

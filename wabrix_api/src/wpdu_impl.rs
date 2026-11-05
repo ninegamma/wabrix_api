@@ -1,11 +1,12 @@
 //! Guest-local behavior for the shared-memory packet layouts.
 
 use crate::headers::{
-    ArpIpv4Header, EndOffset, Header, HeaderKind, IcmpHeader, IpHeader, Ipv6Header, MacHeader,
-    TcpHeader, UdpHeader, MAC_HDR_SIZE,
+    ArpHdr, EndOffset, EthHdr, Header, HeaderKind, Icmpv4Hdr, Icmpv6Hdr, Ipv4Hdr, Ipv6Hdr,
+    TcpHdr, UdpHdr, ETH_HDR_SIZE,
 };
 use crate::shared_memory::{HeaderStack, Pdu0, WPdu};
 use core::ptr;
+use zerocopy::FromBytes;
 // Adjust imports as needed
 
 impl WPdu {
@@ -207,26 +208,33 @@ impl WPdu {
 
             match pdu_header {
                 Header::Null => (),
-                Header::Mac(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_mac().unwrap() as *const MacHeader, *p, 1)
+                Header::Eth(ref mut p) => {
+                    ptr::copy_nonoverlapping(hdr.as_eth().unwrap() as *const EthHdr, *p, 1)
                 }
                 Header::Ip(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_ip().unwrap() as *const IpHeader, *p, 1)
+                    ptr::copy_nonoverlapping(hdr.as_ip().unwrap() as *const Ipv4Hdr, *p, 1)
                 }
                 Header::Ipv6(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_ipv6().unwrap() as *const Ipv6Header, *p, 1)
+                    ptr::copy_nonoverlapping(hdr.as_ipv6().unwrap() as *const Ipv6Hdr, *p, 1)
                 }
                 Header::Tcp(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_tcp().unwrap() as *const TcpHeader, *p, 1)
+                    ptr::copy_nonoverlapping(hdr.as_tcp().unwrap() as *const TcpHdr, *p, 1)
                 }
                 Header::Udp(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_udp().unwrap() as *const UdpHeader, *p, 1)
+                    ptr::copy_nonoverlapping(hdr.as_udp().unwrap() as *const UdpHdr, *p, 1)
                 }
-                Header::Icmp(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_icmp().unwrap() as *const IcmpHeader, *p, 1)
-                }
+                Header::Icmpv4(ref mut p) => ptr::copy_nonoverlapping(
+                    hdr.as_icmpv4().unwrap() as *const Icmpv4Hdr,
+                    *p,
+                    1,
+                ),
+                Header::Icmpv6(ref mut p) => ptr::copy_nonoverlapping(
+                    hdr.as_icmpv6().unwrap() as *const Icmpv6Hdr,
+                    *p,
+                    1,
+                ),
                 Header::ArpIpv4(ref mut p) => ptr::copy_nonoverlapping(
-                    hdr.as_arpipv4().unwrap() as *const ArpIpv4Header,
+                    hdr.as_arpipv4().unwrap() as *const ArpHdr,
                     *p,
                     1,
                 ),
@@ -241,40 +249,32 @@ impl WPdu {
         self.header_stack.clear();
 
         let l = self.data_len() as usize;
-        if l < MacHeader::size() {
+        if l < EthHdr::LEN {
             return 0;
         };
 
-        // Get pointer to the start of the buffer
-        let hdr_ptr = self.data_address(umem_addr, 0) as *mut MacHeader;
+        let hdr_ptr = self.data_address(umem_addr, 0);
+        // SAFETY: The packet-length check above ensures `EthHdr::LEN` bytes are accessible.
+        let hdr_bytes = unsafe { core::slice::from_raw_parts_mut(hdr_ptr, EthHdr::LEN) };
+        let Ok(eth) = EthHdr::mut_from_bytes(hdr_bytes) else {
+            return 0;
+        };
+        let etype = u16::from_be_bytes(eth.ether_type);
+        let offset = eth.offset();
+        self.header_stack
+            .push(self.base_addr(umem_addr), Header::Eth(eth));
 
-        // SAFETY: `data_len() >= MacHeader::size()` was verified above, so `hdr_ptr` points
-        // to at least `size_of::<MacHeader>()` valid bytes within the UMEM frame.
-        // `&mut *hdr_ptr` and `&*hdr_ptr` are never used simultaneously: `mac` is a shared
-        // borrow used only for dispatch, and the mutable reference is consumed by `push()`.
-        unsafe {
-            self.header_stack
-                .push(self.base_addr(umem_addr), Header::Mac(&mut *hdr_ptr));
-            let mac = &*hdr_ptr;
-
-            match mac.etype() {
-                0x0800      // IPv4
-                    if l >= mac.offset() + IpHeader::size() => {
-                        self.parse_ipv4(umem_addr, mac.offset());
-                    }
-
-                0x86DD      // IPv6
-                    if l >= mac.offset() + Ipv6Header::size() => {
-                        self.parse_ipv6(umem_addr, mac.offset());
-                    }
-
-                0x0806      // ARP
-                    if l >= mac.offset() + ArpIpv4Header::size() => {
-                        self.parse_arp(umem_addr, mac.offset());
-                    }
-
-                _ => {}
+        match etype {
+            0x0800 if l >= offset + Ipv4Hdr::LEN => {
+                self.parse_ipv4(umem_addr, offset);
             }
+            0x86DD if l >= offset + Ipv6Hdr::LEN => {
+                self.parse_ipv6(umem_addr, offset);
+            }
+            0x0806 if l >= offset + ArpHdr::LEN => {
+                self.parse_arp(umem_addr, offset);
+            }
+            _ => {}
         }
         self.header_stack.count()
     }
@@ -285,21 +285,24 @@ impl WPdu {
     pub fn parse_fast(&mut self, umem_addr: usize) -> usize {
         self.header_stack.clear();
         let l = self.data_len();
-        if l < MAC_HDR_SIZE as u32 {
+        if l < ETH_HDR_SIZE as u32 {
             return 0;
         }
 
         // Fetch headroom once to shift all our manual offsets
         let hr = self.headroom() as u16;
 
-        self.header_stack.kinds[0] = HeaderKind::Mac;
+        self.header_stack.kinds[0] = HeaderKind::Eth;
         self.header_stack.offsets[0] = hr;
         self.header_stack.hc = 1;
 
-        let mac_ptr = self.data_address(umem_addr, 0) as *const MacHeader;
-        // SAFETY: `l >= MAC_HDR_SIZE` was checked above, so the MAC header bytes are accessible.
-        // `mac_ptr` is derived from `data_address` which adds `umem_base + desc_addr`.
-        let etype = unsafe { (*mac_ptr).etype() };
+        let eth_ptr = self.data_address(umem_addr, 0);
+        // SAFETY: The packet-length check above ensures `EthHdr::LEN` bytes are accessible.
+        let eth_bytes = unsafe { core::slice::from_raw_parts(eth_ptr, EthHdr::LEN) };
+        let Ok(eth) = EthHdr::ref_from_bytes(eth_bytes) else {
+            return 0;
+        };
+        let etype = u16::from_be_bytes(eth.ether_type);
 
         match etype {
             0x0800 => {
@@ -311,22 +314,24 @@ impl WPdu {
                 self.header_stack.kinds[1] = HeaderKind::Ip;
                 self.header_stack.offsets[1] = hr + 14;
 
-                let ip_ptr = self.data_address(umem_addr, 14) as *const IpHeader;
-                // SAFETY: `l >= 14 + 20` was checked above; both reads are within the
-                // fully-accessible IPv4 header at `ip_ptr`.
-                let (l4_proto, ip_len) =
-                    unsafe { ((*ip_ptr).protocol(), (*ip_ptr).offset() as u16) };
+                let ip_ptr = self.data_address(umem_addr, 14);
+                // SAFETY: `l >= 14 + Ipv4Hdr::LEN` was checked above.
+                let ip_bytes = unsafe { core::slice::from_raw_parts(ip_ptr, Ipv4Hdr::LEN) };
+                let Ok(ip) = Ipv4Hdr::ref_from_bytes(ip_bytes) else {
+                    return 1;
+                };
+                let (l4_proto, ip_len) = (ip.proto, ip.offset() as u16);
 
                 let l4_offset = 14 + ip_len;
 
                 match l4_proto {
-                    1 if l >= (l4_offset + 8) as u32 => {
+                    1 if l >= (l4_offset + Icmpv4Hdr::LEN as u16) as u32 => {
                         // ICMP
-                        self.header_stack.kinds[2] = HeaderKind::Icmp;
+                        self.header_stack.kinds[2] = HeaderKind::Icmpv4;
                         self.header_stack.offsets[2] = hr + l4_offset;
                         self.header_stack.hc = 3;
                     }
-                    6 if l >= (l4_offset + 20) as u32 => {
+                    6 if l >= (l4_offset + TcpHdr::LEN as u16) as u32 => {
                         // TCP
                         self.header_stack.kinds[2] = HeaderKind::Tcp;
                         self.header_stack.offsets[2] = hr + l4_offset;
@@ -353,15 +358,15 @@ impl WPdu {
                 self.header_stack.kinds[1] = HeaderKind::Ipv6;
                 self.header_stack.offsets[1] = hr + 14;
 
-                let ipv6_ptr = self.data_address(umem_addr, 14) as *const Ipv6Header;
+                let ipv6_ptr = self.data_address(umem_addr, 14) as *const Ipv6Hdr;
                 // SAFETY: `l >= 14 + 40` was checked above; the IPv6 fixed header (40 bytes) is
                 // fully accessible at offset 14.
-                let next_header = unsafe { (*ipv6_ptr).next_header() };
+                let next_header = unsafe { (*ipv6_ptr).next_hdr };
 
                 let l4_offset = 14 + 40; // IPv6 header is always 40 bytes (no options in base header)
 
                 match next_header {
-                    6 if l >= l4_offset + 20 => {
+                    6 if l >= l4_offset + TcpHdr::LEN as u32 => {
                         // TCP
                         self.header_stack.kinds[2] = HeaderKind::Tcp;
                         self.header_stack.offsets[2] = hr + l4_offset as u16;
@@ -373,9 +378,9 @@ impl WPdu {
                         self.header_stack.offsets[2] = hr + l4_offset as u16;
                         self.header_stack.hc = 3;
                     }
-                    58 if l >= l4_offset + 8 => {
+                    58 if l >= l4_offset + Icmpv6Hdr::LEN as u32 => {
                         // ICMPv6
-                        self.header_stack.kinds[2] = HeaderKind::Icmp;
+                        self.header_stack.kinds[2] = HeaderKind::Icmpv6;
                         self.header_stack.offsets[2] = hr + l4_offset as u16;
                         self.header_stack.hc = 3;
                     }
@@ -401,41 +406,55 @@ impl WPdu {
 
     #[inline]
     fn parse_ipv4(&mut self, umem_addr: usize, offset: usize) {
-        let hdr_ptr = self.data_address(umem_addr, offset) as *mut IpHeader;
-        // SAFETY: The caller (`parse`) checks `l >= mac.offset() + IpHeader::size()` before
-        // calling this function, so `hdr_ptr` points to at least `size_of::<IpHeader>()` valid
-        // bytes. The mutable reference is used only within this block and is not aliased.
-        unsafe {
-            let ip = &mut *hdr_ptr;
-            self.header_stack
-                .push(self.base_addr(umem_addr), Header::Ip(ip));
+        let Some(end) = offset.checked_add(Ipv4Hdr::LEN) else {
+            return;
+        };
+        if end > self.data_len() as usize {
+            return;
+        }
 
-            let next_offset = offset + ip.offset();
-            match ip.protocol() {
-                1 => self.parse_icmp(umem_addr, next_offset),
-                6 => self.parse_tcp(umem_addr, next_offset),
-                17 => self.parse_udp(umem_addr, next_offset),
-                _ => {}
-            }
+        let hdr_ptr = self.data_address(umem_addr, offset);
+        // SAFETY: The preceding bounds check ensures the base IPv4 header is in the packet.
+        let hdr_bytes = unsafe { core::slice::from_raw_parts_mut(hdr_ptr, Ipv4Hdr::LEN) };
+        let Ok(ip) = Ipv4Hdr::mut_from_bytes(hdr_bytes) else {
+            return;
+        };
+        let next_offset = offset + ip.offset();
+        let protocol = ip.proto;
+        self.header_stack
+            .push(self.base_addr(umem_addr), Header::Ip(ip));
+
+        match protocol {
+            1 => self.parse_icmpv4(umem_addr, next_offset),
+            6 => self.parse_tcp(umem_addr, next_offset),
+            17 => self.parse_udp(umem_addr, next_offset),
+            _ => {}
         }
     }
 
     #[inline]
     fn parse_tcp(&mut self, umem_addr: usize, offset: usize) {
-        let hdr = self.data_address(umem_addr, offset) as *mut TcpHeader;
-        // SAFETY: All callers check that `data_len >= offset + TcpHeader::size()` before
-        // calling, so `hdr` points to at least `size_of::<TcpHeader>()` valid bytes.
-        unsafe {
-            self.header_stack
-                .push(self.base_addr(umem_addr), Header::Tcp(&mut *hdr));
+        let Some(end) = offset.checked_add(TcpHdr::LEN) else {
+            return;
+        };
+        if end > self.data_len() as usize {
+            return;
         }
+        let hdr_ptr = self.data_address(umem_addr, offset);
+        // SAFETY: The preceding bounds check ensures the base TCP header is in the packet.
+        let hdr_bytes = unsafe { core::slice::from_raw_parts_mut(hdr_ptr, TcpHdr::LEN) };
+        let Ok(hdr) = TcpHdr::mut_from_bytes(hdr_bytes) else {
+            return;
+        };
+        self.header_stack
+            .push(self.base_addr(umem_addr), Header::Tcp(hdr));
     }
 
     #[inline]
     fn parse_udp(&mut self, umem_addr: usize, offset: usize) {
-        let hdr = self.data_address(umem_addr, offset) as *mut UdpHeader;
-        // SAFETY: All callers check that `data_len >= offset + UdpHeader::size()` before
-        // calling, so `hdr` points to at least `size_of::<UdpHeader>()` valid bytes.
+        let hdr = self.data_address(umem_addr, offset) as *mut UdpHdr;
+        // SAFETY: All callers check that `data_len >= offset + UdpHdr::size()` before
+        // calling, so `hdr` points to at least `size_of::<UdpHdr>()` valid bytes.
         unsafe {
             self.header_stack
                 .push(self.base_addr(umem_addr), Header::Udp(&mut *hdr));
@@ -443,38 +462,69 @@ impl WPdu {
     }
 
     #[inline]
-    fn parse_icmp(&mut self, umem_addr: usize, offset: usize) {
-        let hdr = self.data_address(umem_addr, offset) as *mut IcmpHeader;
-        // SAFETY: All callers check that `data_len >= offset + IcmpHeader::size()` before
-        // calling, so `hdr` points to at least `size_of::<IcmpHeader>()` valid bytes.
-        unsafe {
-            self.header_stack
-                .push(self.base_addr(umem_addr), Header::Icmp(&mut *hdr));
+    fn parse_icmpv4(&mut self, umem_addr: usize, offset: usize) {
+        let Some(end) = offset.checked_add(Icmpv4Hdr::LEN) else {
+            return;
+        };
+        if end > self.data_len() as usize {
+            return;
         }
+        let hdr_ptr = self.data_address(umem_addr, offset);
+        // SAFETY: The preceding bounds check ensures the header bytes are within this packet.
+        let hdr_bytes = unsafe { core::slice::from_raw_parts_mut(hdr_ptr, Icmpv4Hdr::LEN) };
+        let Ok(hdr) = Icmpv4Hdr::mut_from_bytes(hdr_bytes) else {
+            return;
+        };
+        self.header_stack
+            .push(self.base_addr(umem_addr), Header::Icmpv4(hdr));
+    }
+
+    #[inline]
+    fn parse_icmpv6(&mut self, umem_addr: usize, offset: usize) {
+        let Some(end) = offset.checked_add(Icmpv6Hdr::LEN) else {
+            return;
+        };
+        if end > self.data_len() as usize {
+            return;
+        }
+        let hdr_ptr = self.data_address(umem_addr, offset);
+        // SAFETY: The preceding bounds check ensures the header bytes are within this packet.
+        let hdr_bytes = unsafe { core::slice::from_raw_parts_mut(hdr_ptr, Icmpv6Hdr::LEN) };
+        let Ok(hdr) = Icmpv6Hdr::mut_from_bytes(hdr_bytes) else {
+            return;
+        };
+        self.header_stack
+            .push(self.base_addr(umem_addr), Header::Icmpv6(hdr));
     }
 
     #[inline]
     fn parse_arp(&mut self, umem_addr: usize, offset: usize) {
         //TODO generalize for any protocol type, not only Ipv4
-        let hdr = self.data_address(umem_addr, offset) as *mut ArpIpv4Header;
+        let Some(end) = offset.checked_add(ArpHdr::LEN) else {
+            return;
+        };
+        if end > self.data_len() as usize {
+            return;
+        }
 
-        // SAFETY: The caller checks `l >= mac.offset() + ArpIpv4Header::size()` before
-        // calling, so `hdr` points to at least `size_of::<ArpIpv4Header>()` valid bytes.
-        // The hw_type/proto_etype check validates the ARP packet before pushing.
-        unsafe {
-            let arp = &mut *hdr;
-            if arp.hw_type() == 1 && arp.proto_etype() == 0x0800 {
-                self.header_stack
-                    .push(self.base_addr(umem_addr), Header::ArpIpv4(&mut *hdr));
-            }
+        let arp_ptr = self.data_address(umem_addr, offset);
+        // SAFETY: The preceding bounds check ensures `arp_ptr` points to `ArpHdr::LEN` bytes
+        // within this packet. The mutable packet view is exclusive for the duration of parsing.
+        let arp_bytes = unsafe { core::slice::from_raw_parts_mut(arp_ptr, ArpHdr::LEN) };
+        let Ok(arp) = ArpHdr::mut_from_bytes(arp_bytes) else {
+            return;
+        };
+        if arp.htype() == 1 && arp.ptype() == 0x0800 {
+            self.header_stack
+                .push(self.base_addr(umem_addr), Header::ArpIpv4(arp));
         }
     }
 
     #[inline]
     fn parse_ipv6(&mut self, umem_addr: usize, offset: usize) {
-        let hdr = self.data_address(umem_addr, offset) as *mut Ipv6Header;
-        // SAFETY: The caller checks `l >= offset + Ipv6Header::size()` before calling, so
-        // `hdr` points to at least `size_of::<Ipv6Header>()` (40) valid bytes.
+        let hdr = self.data_address(umem_addr, offset) as *mut Ipv6Hdr;
+        // SAFETY: The caller checks `l >= offset + Ipv6Hdr::LEN` before calling, so
+        // `hdr` points to at least `size_of::<Ipv6Hdr>()` (40) valid bytes.
         unsafe {
             self.header_stack
                 .push(self.base_addr(umem_addr), Header::Ipv6(&mut *hdr));
@@ -483,22 +533,22 @@ impl WPdu {
         // SAFETY: Same bounds as above; reading `next_header` from an already-validated pointer.
         unsafe {
             let ipv6 = &mut *hdr;
-            next_header = ipv6.next_header();
+            next_header = ipv6.next_hdr;
         }
         match next_header {
             6   // TCP
-                if self.data_len() >= (offset + Ipv6Header::size() + TcpHeader::size()) as u32 => {
-                    self.parse_tcp(umem_addr, offset + Ipv6Header::size());
+                if self.data_len() >= (offset + Ipv6Hdr::LEN + TcpHdr::LEN) as u32 => {
+                    self.parse_tcp(umem_addr, offset + Ipv6Hdr::LEN);
                 }
 
             17  // UDP
-                if self.data_len() >= (offset + Ipv6Header::size() + UdpHeader::size()) as u32 => {
-                    self.parse_udp(umem_addr, offset + Ipv6Header::size());
+                if self.data_len() >= (offset + Ipv6Hdr::LEN + UdpHdr::size()) as u32 => {
+                    self.parse_udp(umem_addr, offset + Ipv6Hdr::LEN);
                 }
 
             58  // ICMPv6
-                if self.data_len() >= (offset + Ipv6Header::size() + IcmpHeader::size()) as u32 => {
-                    self.parse_icmp(umem_addr, offset + Ipv6Header::size());
+                if self.data_len() >= (offset + Ipv6Hdr::LEN + Icmpv6Hdr::LEN) as u32 => {
+                    self.parse_icmpv6(umem_addr, offset + Ipv6Hdr::LEN);
                 }
 
             _ => {}
@@ -576,7 +626,12 @@ impl WPdu {
 
     #[inline]
     pub fn is_icmp(&self) -> bool {
-        (0..self.header_stack.count()).any(|i| self.header_stack.kinds[i] == HeaderKind::Icmp)
+        (0..self.header_stack.count()).any(|i| {
+            matches!(
+                self.header_stack.kinds[i],
+                HeaderKind::Icmpv4 | HeaderKind::Icmpv6
+            )
+        })
     }
 
     #[inline]
@@ -605,8 +660,9 @@ impl WPdu {
     pub fn ether_type(&self, umem_addr: usize) -> u16 {
         let base_addr = self.base_addr(umem_addr);
         for i in 0..self.header_stack.count() {
-            if self.header_stack.get(base_addr, i).kind() == HeaderKind::Mac {
-                return self.header_stack.mac(base_addr, i).etype();
+            if self.header_stack.get(base_addr, i).kind() == HeaderKind::Eth {
+                let eth = self.header_stack.get(base_addr, i);
+                return u16::from_be_bytes(eth.as_eth().unwrap().ether_type);
             }
         }
         0 // Return 0 if no MAC header found
@@ -616,8 +672,19 @@ impl WPdu {
     #[inline]
     pub fn ipv4_src(&self, umem_addr: usize) -> Option<u32> {
         for i in 0..self.header_stack.count() {
-            if self.header_stack.get(self.base_addr(umem_addr), i).kind() == HeaderKind::Ip {
-                return Some(self.header_stack.ip(self.base_addr(umem_addr), i).src());
+            if self.header_stack.kinds[i] == HeaderKind::Ip {
+                let frame_offset = self.header_stack.offsets[i] as usize;
+                let packet_offset = frame_offset.checked_sub(self.headroom())?;
+                let end = packet_offset.checked_add(Ipv4Hdr::LEN)?;
+                if end > self.data_len() as usize {
+                    return None;
+                }
+
+                let ip_ptr = self.data_address(umem_addr, packet_offset);
+                // SAFETY: The offset checks above ensure the base IPv4 header is in the packet.
+                let ip_bytes = unsafe { core::slice::from_raw_parts(ip_ptr, Ipv4Hdr::LEN) };
+                let ip = Ipv4Hdr::ref_from_bytes(ip_bytes).ok()?;
+                return Some(u32::from(ip.src_addr()));
             }
         }
         None
@@ -746,9 +813,9 @@ impl Pdu0 {
     #[inline(always)]
     pub fn write_tcp_ipv4_headers(
         &mut self,
-        mac: &MacHeader,
-        ip: &IpHeader,
-        tcp: &TcpHeader,
+        mac: &EthHdr,
+        ip: &Ipv4Hdr,
+        tcp: &TcpHdr,
         umem_offset: u32,
     ) -> u32 {
         // SAFETY: `umem_offset` comes directly from the host ABI; `data_mut` is called
@@ -756,9 +823,9 @@ impl Pdu0 {
         // to the same frame is live concurrently.
         let data = unsafe { self.data_mut(umem_offset) };
 
-        let mac_len = core::mem::size_of::<MacHeader>();
-        let ip_len = core::mem::size_of::<IpHeader>();
-        let tcp_len = core::mem::size_of::<TcpHeader>();
+        let mac_len = EthHdr::LEN;
+        let ip_len = Ipv4Hdr::LEN;
+        let tcp_len = TcpHdr::LEN;
 
         // SAFETY: `mac`, `ip`, and `tcp` are valid references to `#[repr(C)]` Copy types on
         // the caller's stack. Casting to `*const u8` and reading `size_of::<T>()` bytes is

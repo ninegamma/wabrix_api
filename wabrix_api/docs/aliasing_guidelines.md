@@ -61,5 +61,5 @@ If a DAG node routes packets across worker/core boundaries (e.g., steering flows
 To enforce this design in code without violating memory rules, adhere to these structural constraints:
 
 * **No Mutexes or Atomic Locks on Headers:** `HeaderPtr` must remain a direct, raw pointer wrapper mapped over UMEM. Synchronization must be guaranteed by the DAG scheduler architecture, not by locking the header structure itself.
-* **Short-Lived Accessors:** Accessor methods on `HeaderPtr` (such as `as_ip_mut()`) must generate short-lived, unbounded lifetime references (`&mut IpHeader`) that do not persist across node execution boundaries.
+* **Short-Lived Accessors:** Accessor methods on `HeaderPtr` (such as `as_ip_mut()`) must generate short-lived, unbounded lifetime references (`&mut Ipv4Hdr`) that do not persist across node execution boundaries.
 * **Sanity Gate in Node Execution:** Ensure that nodes operating in a `Split` directive return distinct `Batch` containers, preventing two active pipeline nodes from holding references to the same `HeaderPtr` simultaneously.

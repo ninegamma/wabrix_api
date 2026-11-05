@@ -5,6 +5,7 @@ version.workspace = true
 
 [dependencies]
 network-types = { workspace = true }
+zerocopy = { workspace = true }
 macaddr = { workspace = true }
 # We set default-features = false to force these crates into strictly no_std mode!
 byteorder = { version = "1.5.0", default-features = false }

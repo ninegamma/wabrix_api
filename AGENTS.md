@@ -51,7 +51,7 @@ wabrix_api/
 | `wabrix_api/src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations |
 | `wabrix_api/src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `Pdu0` + UMEM base address; primary plugin-facing API |
 | `wabrix_api/src/hstack.rs` | `HeaderStack` — fixed-capacity (5 slots) parsed header descriptor; exactly 16 bytes |
-| `wabrix_api/src/headers/` | Zero-copy header structs: `MacHeader`, `IpHeader`, `TcpHeader`, `UdpHeader`, `IcmpHeader`, `ArpIpv4Header`, `Ipv6Header` |
+| `wabrix_api/src/headers/` | Zero-copy header structs: `EthHeader`, `IpHeader`, `TcpHeader`, `UdpHeader`, `IcmpHeader`, `ArpIpv4Header`, `Ipv6Header` |
 | `wabrix_api/src/exports.rs` | Visibility gating for `Pdu0` / `HeaderStack`: `pub` when `host` feature enabled, `pub(crate)` otherwise |
 | `wabrix_api/src/wpdu_impl.rs` | `Pdu0` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
 | `wabrix_api/src/helpers.rs` | Checksum helpers and other protocol utilities |
