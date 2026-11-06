@@ -8,9 +8,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::{mem::size_of, ptr};
 use core::net::Ipv4Addr;
-use network_types::eth::EtherType;
-use network_types::ip::IpProto;
-
+use network_types::eth::{EthHdr, EtherType};
+use network_types::ip::{IpProto, Ipv4Hdr};
+use network_types::udp::UdpHdr;
 use crate::exports::wabrix::plugins::packet_engine::{
     Counter, Guest, TelemetryMetric, TelemetrySchema, TimerPlan,
 };
@@ -20,7 +20,7 @@ use wabrix_api::engine_common::{handle_control_event, ControlResult};
 use wabrix_api::engine_common::{parse_generator_config, WasmCell, WasmValue};
 use wabrix_api::headers::check::{finalize_checksum, ipv4_checksum};
 use wabrix_api::headers::{
-    new_ipv4_header, update_ipv4_checksum, EthHdr, Ipv4Hdr, UdpHdr,
+    new_ipv4_header, update_ipv4_checksum,
 };
 use wabrix_api::mailbox_api::{MailboxBatch, MailboxPacket};
 use wabrix_api::{MAX_BATCH_SIZE, TIMER_KIND_TIMEOUT};

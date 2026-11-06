@@ -1,11 +1,11 @@
 use crate::exports::WPdu;
 use crate::headers::check::ipv4_checksum;
-use crate::headers::{
-    update_ipv4_checksum, EndOffset, HeaderKind, Ipv4Hdr, TcpHdr,
-};
+use crate::headers::{update_ipv4_checksum, EndOffset, HeaderKind};
 use anyhow::anyhow;
 use log::trace;
 use zerocopy::FromBytes;
+use network_types::ip::Ipv4Hdr;
+use network_types::tcp::TcpHdr;
 
 #[inline]
 pub fn update_tcp_checksum(

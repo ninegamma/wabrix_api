@@ -1,9 +1,13 @@
-use crate::headers::{
-    ArpHdr, EthHdr, HeaderKind, Icmpv4Hdr, Icmpv6Hdr, Ipv4Hdr, Ipv6Hdr, TcpHdr, UdpHdr,
-};
-use crate::hstack::HeaderStack;
+use crate::headers::hstack::HeaderStack;
+use crate::headers::HeaderKind;
 use crate::shared_memory::SharedPdu;
 use core::slice;
+use network_types::arp::ArpHdr;
+use network_types::eth::EthHdr;
+use network_types::icmp::{Icmpv4Hdr, Icmpv6Hdr};
+use network_types::ip::{Ipv4Hdr, Ipv6Hdr};
+use network_types::tcp::TcpHdr;
+use network_types::udp::UdpHdr;
 use zerocopy::FromBytes;
 
 /// The safe, high-level interface for a single packet.
@@ -165,73 +169,65 @@ impl<'a> Packet<'a> {
     /// Returns a typed reference to the TCP header if it exists
     #[inline]
     pub fn tcp_header(&self) -> Option<&TcpHdr> {
-        let offset = self.header_data_offset(HeaderKind::Tcp, true)?;
-        let end = offset.checked_add(TcpHdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        TcpHdr::ref_from_bytes(header_bytes).ok()
+        let which = self.pdu.header_stack.which_ix(HeaderKind::Tcp)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.tcp_hdr(base_addr, which))
     }
 
     /// Returns a typed reference to the IPv4 header if it exists
     #[inline]
     pub fn ipv4_header(&self) -> Option<&Ipv4Hdr> {
-        let offset = self.header_data_offset(HeaderKind::Ip, false)?;
-        let end = offset.checked_add(Ipv4Hdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        Ipv4Hdr::ref_from_bytes(header_bytes).ok()
+        let which = self.pdu.header_stack.which_ix(HeaderKind::Ip)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.ip_hdr(base_addr, which))
     }
 
     /// Returns a typed reference to the MAC header if it exists
     #[inline]
-    pub fn mac_header(&self) -> Option<&EthHdr> {
-        let offset = self.header_data_offset(HeaderKind::Eth, false)?;
-        let end = offset.checked_add(EthHdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        EthHdr::ref_from_bytes(header_bytes).ok()
+    pub fn eth_header(&self) -> Option<&EthHdr> {
+        let which = self.pdu.header_stack.which_ix(HeaderKind::Eth)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.eth_hdr(base_addr, which))
     }
 
     /// Returns a typed reference to the UDP header if it exists
     #[inline]
     pub fn udp_header(&self) -> Option<&UdpHdr> {
-        let offset = self.header_data_offset(HeaderKind::Udp, true)?;
-        let end = offset.checked_add(UdpHdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        UdpHdr::ref_from_bytes(header_bytes).ok()
+        let which = self.pdu.header_stack.which_ix(HeaderKind::Udp)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.udp_hdr(base_addr, which))
     }
 
     /// Returns a typed reference to the ARP header if it exists
     #[inline]
     pub fn arp_header(&self) -> Option<&ArpHdr> {
-        let offset = self.header_data_offset(HeaderKind::ArpIpv4, false)?;
-        let end = offset.checked_add(ArpHdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        ArpHdr::ref_from_bytes(header_bytes).ok()
+        let which = self.pdu.header_stack.which_ix(HeaderKind::ArpIpv4)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.arp_hdr(base_addr, which))
     }
 
     /// Returns a typed reference to the IPv6 header if it exists
     #[inline]
     pub fn ipv6_header(&self) -> Option<&Ipv6Hdr> {
-        let offset = self.header_data_offset(HeaderKind::Ipv6, false)?;
-        let end = offset.checked_add(Ipv6Hdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        Ipv6Hdr::ref_from_bytes(header_bytes).ok()
+        let which = self.pdu.header_stack.which_ix(HeaderKind::Ipv6)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.ipv6_hdr(base_addr, which))
     }
 
     /// Returns a typed reference to the ICMPv4 header if it exists
     #[inline]
     pub fn icmpv4_header(&self) -> Option<&Icmpv4Hdr> {
-        let offset = self.header_data_offset(HeaderKind::Icmpv4, true)?;
-        let end = offset.checked_add(Icmpv4Hdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        Icmpv4Hdr::ref_from_bytes(header_bytes).ok()
+        let which = self.pdu.header_stack.which_ix(HeaderKind::Icmpv4)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.icmpv4_hdr(base_addr, which))
     }
 
     /// Returns a typed reference to the ICMPv6 header if it exists
     #[inline]
     pub fn icmpv6_header(&self) -> Option<&Icmpv6Hdr> {
-        let offset = self.header_data_offset(HeaderKind::Icmpv6, true)?;
-        let end = offset.checked_add(Icmpv6Hdr::LEN)?;
-        let header_bytes = self.data().get(offset..end)?;
-        Icmpv6Hdr::ref_from_bytes(header_bytes).ok()
+        let which = self.pdu.header_stack.which_ix(HeaderKind::Icmpv6)?;
+        let base_addr = self.pdu.base_addr(self.umem_base);
+        Some(self.pdu.header_stack.icmpv6_hdr(base_addr, which))
     }
 
     // =================================================================
@@ -258,7 +254,7 @@ impl<'a> Packet<'a> {
 
     /// Returns a mutable typed reference to the MAC header
     #[inline]
-    pub fn mac_header_mut(&mut self) -> Option<&mut EthHdr> {
+    pub fn eth_header_mut(&mut self) -> Option<&mut EthHdr> {
         let offset = self.header_data_offset(HeaderKind::Eth, false)?;
         let end = offset.checked_add(EthHdr::LEN)?;
         let header_bytes = self.data_mut().get_mut(offset..end)?;
@@ -353,7 +349,7 @@ impl<'a> Packet<'a> {
     }
     /// Writes a MAC header to the start of the frame and updates the header stack.
     #[inline(always)]
-    pub fn write_mac_header(&mut self, mac: &EthHdr) -> u32 {
+    pub fn write_eth_header(&mut self, mac: &EthHdr) -> u32 {
         let mac_len = EthHdr::LEN;
         let ptr = self.data_ptr_mut();
 

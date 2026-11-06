@@ -1,24 +1,18 @@
 use core::fmt;
+use zerocopy::IntoBytes;
+pub use self::end_offset::*;
+use crate::headers::check::checksum;
+use network_types::arp::ArpHdr;
+use network_types::eth::EthHdr;
+use network_types::icmp::{Icmpv4Hdr, Icmpv6Hdr};
+use network_types::ip::{Ipv4Hdr, Ipv6Hdr};
+use network_types::tcp::TcpHdr;
+use network_types::udp::UdpHdr;
 
-pub use self::arp::*;
-pub use self::icmp::*;
-pub use self::ip::*;
-pub use self::ipv6::*;
-pub use self::mac::*;
-pub use self::null_header::*;
-pub use self::tcp::*;
-pub use self::udp::*;
-
-mod arp;
 pub mod check;
+mod end_offset;
 pub mod flow;
-mod icmp;
-mod ip;
-mod ipv6;
-mod mac;
-mod null_header;
-mod tcp;
-mod udp;
+pub mod hstack;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,22 +26,6 @@ pub enum HeaderKind {
     Udp,
     Icmpv4 = 7,
     Icmpv6 = 8,
-}
-
-/// A trait implemented by all headers, used for reading them from a frame.
-pub trait EndOffset: Send {
-    /// Offset returns the number of bytes to skip to get to the next header, relative to the start
-    /// of the frame data.
-    fn offset(&self) -> usize;
-
-    /// Returns the size of this header in bytes.
-    fn size() -> usize;
-
-    /// Returns the size of the payload in bytes. The hint is necessary for things like the L2 header which have no
-    /// explicit length field.
-    fn payload_size(&self, hint: usize) -> usize;
-
-    fn header_kind(&self) -> HeaderKind;
 }
 
 #[derive(Debug)]
@@ -318,6 +296,41 @@ impl fmt::Display for HeaderPtr {
             Header::ArpIpv4(_) => write!(f, "{:?}", self.as_arpipv4().unwrap()),
         }
     }
+}
+
+
+#[derive(Debug, Default)]
+#[repr(C, packed)]
+pub struct NullHeader;
+
+impl fmt::Display for NullHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "null")
+    }
+}
+
+/// Creates a zeroed IPv4 header for packet construction.
+#[inline]
+pub fn new_ipv4_header() -> Ipv4Hdr {
+    Ipv4Hdr {
+        vihl: 0,
+        tos: 0,
+        tot_len: [0; 2],
+        id: [0; 2],
+        frags: [0; 2],
+        ttl: 0,
+        proto: 0,
+        check: [0; 2],
+        src_addr: [0; 4],
+        dst_addr: [0; 4],
+    }
+}
+
+/// Recalculates the IPv4 header checksum after its fields have been updated.
+#[inline]
+pub fn update_ipv4_checksum(header: &mut Ipv4Hdr) {
+    header.check = [0; 2];
+    header.set_checksum(checksum(header.as_bytes(), 5));
 }
 
 #[test]

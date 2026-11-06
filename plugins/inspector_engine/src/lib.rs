@@ -485,7 +485,7 @@ impl Guest for InspectorEngine {
             // receiving interface. Apply the configured reverse Ethernet
             // addresses so the frame reaches the other NIC port.
             if config.src_mac.is_some() || config.dst_mac.is_some() {
-                if let Some(header) = packet.mac_header_mut() {
+                if let Some(header) = packet.eth_header_mut() {
                     if let Some(mac) = config.src_mac {
                         let mac = MacAddr6::from(mac);
                         header.set_smac(&mac);

@@ -6,12 +6,13 @@ use crate::exports::wabrix::plugins::generator::Guest;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use core::sync::atomic::{AtomicU32, Ordering};
-use network_types::eth::EtherType;
-use network_types::ip::IpProto;
+use network_types::eth::{EthHdr, EtherType};
+use network_types::ip::{IpProto, Ipv4Hdr};
 use spin::Mutex; // <-- idiomatic no_std lock
-use wabrix_api::headers::{new_ipv4_header, new_tcp_header, EthHdr, Ipv4Hdr};
+use wabrix_api::headers::new_ipv4_header;
 use wabrix_api::helpers::{parse_ip, parse_mac};
 use wabrix_api::packet::PacketBatch;
+use wabrix_api::tcp_common::new_tcp_header;
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({

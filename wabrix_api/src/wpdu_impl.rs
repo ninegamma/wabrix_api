@@ -1,12 +1,16 @@
 //! Guest-local behavior for the shared-memory packet layouts.
 
-use crate::headers::{
-    ArpHdr, EndOffset, EthHdr, Header, HeaderKind, Icmpv4Hdr, Icmpv6Hdr, Ipv4Hdr, Ipv6Hdr,
-    TcpHdr, UdpHdr, ETH_HDR_SIZE,
-};
+
 use crate::shared_memory::{HeaderStack, Pdu0, WPdu};
 use core::ptr;
 use zerocopy::FromBytes;
+use network_types::arp::ArpHdr;
+use network_types::eth::EthHdr;
+use network_types::icmp::{Icmpv4Hdr, Icmpv6Hdr};
+use network_types::ip::{Ipv4Hdr, Ipv6Hdr};
+use network_types::tcp::TcpHdr;
+use network_types::udp::UdpHdr;
+use crate::headers::{EndOffset, Header, HeaderKind, ETH_HDR_SIZE};
 // Adjust imports as needed
 
 impl WPdu {
@@ -194,54 +198,6 @@ impl WPdu {
         self.rx_timestamp = timestamp;
     }
 
-    #[inline]
-    pub fn replace_header(&mut self, umem_addr: usize, which: usize, hdr: &Header) {
-        // SAFETY: `pdu_header` is reconstructed from `HeaderStack` offsets that were set during
-        // parsing from valid frame data. `assert_eq!` enforces type consistency so each
-        // `copy_nonoverlapping` copies exactly one element of the correct type. `hdr` is a
-        // caller-supplied reference; because it points to a local or caller-owned value, it
-        // cannot alias the destination inside the UMEM frame.
-        unsafe {
-            // HeaderStack calculates headers on the fly. We get a view (pointer wrapper).
-            let mut pdu_header = self.header_stack.get(self.base_addr(umem_addr), which);
-            assert_eq!(hdr.kind(), pdu_header.kind());
-
-            match pdu_header {
-                Header::Null => (),
-                Header::Eth(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_eth().unwrap() as *const EthHdr, *p, 1)
-                }
-                Header::Ip(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_ip().unwrap() as *const Ipv4Hdr, *p, 1)
-                }
-                Header::Ipv6(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_ipv6().unwrap() as *const Ipv6Hdr, *p, 1)
-                }
-                Header::Tcp(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_tcp().unwrap() as *const TcpHdr, *p, 1)
-                }
-                Header::Udp(ref mut p) => {
-                    ptr::copy_nonoverlapping(hdr.as_udp().unwrap() as *const UdpHdr, *p, 1)
-                }
-                Header::Icmpv4(ref mut p) => ptr::copy_nonoverlapping(
-                    hdr.as_icmpv4().unwrap() as *const Icmpv4Hdr,
-                    *p,
-                    1,
-                ),
-                Header::Icmpv6(ref mut p) => ptr::copy_nonoverlapping(
-                    hdr.as_icmpv6().unwrap() as *const Icmpv6Hdr,
-                    *p,
-                    1,
-                ),
-                Header::ArpIpv4(ref mut p) => ptr::copy_nonoverlapping(
-                    hdr.as_arpipv4().unwrap() as *const ArpHdr,
-                    *p,
-                    1,
-                ),
-            };
-        }
-    }
-
     /// Assumes an Ethernet frame and parses up to L4
     #[inline]
     pub fn parse(&mut self, umem_addr: usize) -> usize {
@@ -279,8 +235,9 @@ impl WPdu {
         self.header_stack.count()
     }
 
-    /// The fixed Fast Parser. It now accounts for the headroom!
+    /// The fixed Fast Parser
     /// Supports: IPv4, IPv6, ARP, TCP, UDP, ICMP, ICMPv6, SCTP
+    /// Returns the number of headers parsed
     #[inline]
     pub fn parse_fast(&mut self, umem_addr: usize) -> usize {
         self.header_stack.clear();
@@ -400,7 +357,6 @@ impl WPdu {
                 // Unknown EtherType or truncated ARP - just MAC header
             }
         }
-
         self.header_stack.count()
     }
 

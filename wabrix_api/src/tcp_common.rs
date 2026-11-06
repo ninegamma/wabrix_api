@@ -4,13 +4,15 @@ use core::mem::size_of;
 use core::net::Ipv4Addr;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
-use network_types::eth::EtherType;
-use network_types::ip::IpProto;
+use network_types::eth::{EthHdr, EtherType};
+use network_types::ip::{IpProto, Ipv4Hdr};
+use network_types::tcp::TcpHdr;
+use network_types::udp::UdpHdr;
 
 use crate::connections::{ConnectionNode, FlowKey, TcpState};
 use crate::headers::check::ipv4_checksum;
 use crate::headers::{
-    new_ipv4_header, new_tcp_header, set_tcp_flags, update_ipv4_checksum, EthHdr, Ipv4Hdr, UdpHdr,
+    new_ipv4_header, update_ipv4_checksum,
 };
 use crate::helpers::update_tcp_checksum;
 use crate::packet::Packet;
@@ -84,6 +86,51 @@ pub const TCP_STAT_NAMES: [&str; STAT_COUNT] = [
     "to_linux",
     "drop",
 ];
+
+/// Creates a zeroed TCP header for packet construction.
+#[inline]
+pub fn new_tcp_header() -> TcpHdr {
+    TcpHdr {
+        source: [0; 2],
+        dest: [0; 2],
+        seq: [0; 4],
+        ack_seq: [0; 4],
+        _bitfield_align_1: [],
+        _bitfield_1: TcpHdr::new_bitfield_1(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        window: [0; 2],
+        check: [0; 2],
+        urg_ptr: [0; 2],
+    }
+}
+
+/// Converts the TCP flag bitfield to the conventional wire flag byte.
+#[inline]
+pub fn tcp_flags(header: &TcpHdr) -> u8 {
+    (header.fin() as u8)
+        | ((header.syn() as u8) << 1)
+        | ((header.rst() as u8) << 2)
+        | ((header.psh() as u8) << 3)
+        | ((header.ack() as u8) << 4)
+        | ((header.urg() as u8) << 5)
+        | ((header.ece() as u8) << 6)
+        | ((header.cwr() as u8) << 7)
+}
+
+/// Sets the standard TCP flags from their conventional wire flag byte.
+#[inline]
+pub fn set_tcp_flags(header: &mut TcpHdr, flags: u8) {
+    header.set_fin((flags & 0x01) as u16);
+    header.set_syn(((flags >> 1) & 1) as u16);
+    header.set_rst(((flags >> 2) & 1) as u16);
+    header.set_psh(((flags >> 3) & 1) as u16);
+    header.set_ack(((flags >> 4) & 1) as u16);
+    header.set_urg(((flags >> 5) & 1) as u16);
+    header.set_ece(((flags >> 6) & 1) as u16);
+    header.set_cwr(((flags >> 7) & 1) as u16);
+}
+
+
+
 
 /// Builds the shared telemetry vector: all packet counters followed by the
 /// connection arena high-water mark.

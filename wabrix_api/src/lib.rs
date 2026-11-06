@@ -18,7 +18,6 @@ mod wpdu_impl;
 pub mod connections;
 pub mod engine_common;
 pub mod exports;
-mod hstack;
 pub mod tcp_common;
 
 pub use shared_memory::{BatchMetadata, SharedMailbox, SharedPdu, WpduCore, MAX_BATCH_SIZE};

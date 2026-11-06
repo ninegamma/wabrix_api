@@ -12,18 +12,10 @@ use wabrix_api::connections::{ConnectionPool, FlowKey, TcpState};
 use wabrix_api::engine_common::{
     handle_control_event, parse_tcp_engine_config, ControlResult, WasmCell, WasmValue,
 };
-use wabrix_api::headers::tcp_flags;
 use wabrix_api::helpers::parse_suffixed_number;
 use wabrix_api::mailbox_api::MailboxBatch;
 use wabrix_api::packet::Packet;
-use wabrix_api::tcp_common::{
-    run_tcp_state_machine, tcp_telemetry, write_tcp_packet, EngineTimerPlan, PacketGenerator,
-    TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE,
-    PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN,
-    STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED,
-    TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX, TCP_ROUTE_TX as ROUTE_TX,
-    TCP_STAT_NAMES,
-};
+use wabrix_api::tcp_common::{run_tcp_state_machine, tcp_flags, tcp_telemetry, write_tcp_packet, EngineTimerPlan, PacketGenerator, TcpEngineConfig, TimeoutStack, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, PORT_END_RANGE, PORT_START_RANGE, STAT_COUNT, STAT_DROP, STAT_RECV_RST, STAT_RECV_SYN, STAT_SENT_FIN, STAT_SENT_RST, STAT_SENT_SYN, STAT_SENT_SYNACK, STAT_TICK_DROP, STAT_TO_LINUX, STAT_UNEXPECTED, TCP_ROUTE_DROP as ROUTE_DROP, TCP_ROUTE_LINUX as ROUTE_LINUX, TCP_ROUTE_TX as ROUTE_TX, TCP_STAT_NAMES};
 use wabrix_api::{
     HotWasmPayload, PluginOpcode, StandardOpcode, MAX_BATCH_SIZE, TIMER_KIND_NONE,
     TIMER_KIND_TIMEOUT,
@@ -178,7 +170,6 @@ impl Guest for TcpEngine {
             return batch_size;
         };
 
-        //let local_config = CONFIG.borrow().clone().unwrap_or_default();
         let mut processed_count = 0;
 
         // Fast-Path Bypass
@@ -363,7 +354,7 @@ impl Guest for TcpEngine {
             } else {
                 if packet.fingerprint() == Packet::TCP_OVER_IPV4 {
                     let p = packet.as_packet();
-                    unsafe { handle_tcp_packet(p, pool, local_config, touch_interval_cycles) }
+                    unsafe { process_tcp_packet(p, pool, local_config, touch_interval_cycles) }
                 } else {
                     inc_stat!(STAT_TO_LINUX);
                     (ROUTE_LINUX, packet.data_len())
@@ -770,7 +761,7 @@ fn flush_state(mode: u8) {
 }
 
 /// Extracts protocol data, runs the state machine, and formats replies
-unsafe fn handle_tcp_packet(
+unsafe fn process_tcp_packet(
     packet: &mut Packet,
     pool: &mut ConnectionPool,
     config: &TcpEngineConfig,
@@ -779,7 +770,7 @@ unsafe fn handle_tcp_packet(
     let current_tsc = CURRENT_TSC.get();
 
     // Safely extract the strongly-typed headers using the Context Wrapper
-    let mac_hdr = match packet.mac_header() {
+    let mac_hdr = match packet.eth_header() {
         Some(m) => m,
         None => return (ROUTE_LINUX, packet.data_len()),
     };
@@ -801,7 +792,7 @@ unsafe fn handle_tcp_packet(
     let dst_port = u16::from_be_bytes(tcp_hdr.dest);
     let flow_key = FlowKey(src_ip, src_port, dst_ip, dst_port);
     log::trace!(
-        "handle_tcp_packet: processing packet with flow_key {:?}",
+        "process_tcp_packet: processing packet with flow_key {:?}",
         flow_key
     );
 
