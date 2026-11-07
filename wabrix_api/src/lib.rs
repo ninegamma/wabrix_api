@@ -13,15 +13,12 @@ pub mod shared_memory;
 pub mod shared_state;
 // Declare the implementation file, but keep it hidden from the outside world.
 mod wpdu_impl;
-// Declare the routing module as public.
-// (It will decide internally what to actually export).
-pub mod connections;
-pub mod engine_common;
 pub mod exports;
-pub mod tcp_common;
+pub mod timers;
 
 pub use shared_memory::{BatchMetadata, SharedMailbox, SharedPdu, WpduCore, MAX_BATCH_SIZE};
 pub use shared_state::SharedState;
+pub use timers::EngineTimerPlan;
 
 /// Timer frame kinds stored in the reserved WPdu padding byte.
 pub const TIMER_KIND_NONE: u8 = 0;

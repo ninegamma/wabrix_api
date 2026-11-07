@@ -14,7 +14,6 @@ anyhow = { workspace = true }
 log = "0.4.29"
 hashbrown = { version = "0.17.1", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
-postcard = { workspace = true }
 [lib]
 name="wabrix_api"
 path="src/lib.rs"

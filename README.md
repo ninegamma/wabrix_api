@@ -18,7 +18,7 @@ To create a new Wabrix plugin, create a standard Rust library crate and add `wab
 
 ### 1. Set up `Cargo.toml`
 
-Configure your plugin to compile as a dynamic C-library (`cdylib`), which is required for WebAssembly components. See wabrix_api/plugins for examples.
+Configure your plugin to compile as a dynamic C-library (`cdylib`), which is required for WebAssembly components. See [wabrix_plugins/plugins](../wabrix_plugins/plugins) for examples.
 
 ### 2. Build the Plugin
 
@@ -36,28 +36,32 @@ cargo build --target wasm32-wasip2 --release
 
 The resulting `.wasm` file will be located at `target/wasm32-wasip2/release/my_wabrix_plugin.wasm` and is ready to be loaded via your Wabrix TOML configuration.
 
-### Generator Runtime Diagnostics
-
-The example `generator_engine` plugin provides an optional
-`runtime-diagnostics` feature for investigating timer-based rate control. It
-adds completion-time counters for `process_timers()` calls, credited timer
-cycles, requested frames, timer timestamps, the final cycle accumulator, and
-available/final-frame histograms. The feature is disabled by default to keep
-the normal plugin build free of diagnostic counter updates.
-
-Build it with:
-
-```bash
-cargo build -p generator_engine --target wasm32-wasip2 --release \
-  --features runtime-diagnostics
-```
-
-Host-side final timer summaries are controlled separately by the Wabrix engine’s
-`runtime-diagnostics` feature.
-
 ## 🛠 Architecture
 
 Wabrix plugins operate as nodes within a unified processing graph. By utilizing this API, your compiled `.wasm` modules can natively receive parsed network packets and events, interact with the engine's control plane via opcodes, and dispatch packets to subsequent routing nodes.
+
+The generic SDK and plugin implementations live in separate Git repositories and Cargo workspaces:
+
+* `wabrix_api` provides packet and header access, shared-memory layouts, mailbox
+  batches, shared state, control opcodes, and `EngineTimerPlan`. It remains
+  independent of plugin implementations.
+* `wabrix_plugins` depends on `wabrix_api` and provides `tcp_common`,
+  `connections`, and `engine_common`: the TCP state machine, connection pool,
+  packet generator, configuration parsing, and engine control handling. It is
+  `no_std` and can also be used by native engine nodes. Its sibling repository
+  contains the example plugin crates under `plugins/`, with its own lockfile and
+  Wasm build configuration.
+
+Plugins using those implementations should add `wabrix_plugins` alongside
+`wabrix_api` and import them through `wabrix_plugins::{tcp_common, connections,
+engine_common}`. The generic timer plan is available as
+`wabrix_api::EngineTimerPlan`. Filter and inspector plugins only need
+`wabrix_api`.
+
+The canonical WIT interfaces remain in `wit/wabrix.wit`. The plugin repository
+uses a snapshot pinned to an SDK Git revision and SHA-256 checksum; its
+`scripts/sync_wit.py` tool updates and verifies that snapshot. See the sibling
+[plugin README](../wabrix_plugins/README.md) for plugin builds and diagnostics.
 
 ## 📄 License
 

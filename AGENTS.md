@@ -2,10 +2,11 @@
 
 ## 1. Project Overview & Philosophy
 
-The project is split into two repositories:
+The project is split into three repositories:
 
 * **wabrix:** Contains the code for the platform of the dataplane engine.
-* **wabrix_api:** Contains the public SDK for creating WASM plugins for the wabrix platform (includes `wabrix_api` crate and `.wit` interface definitions).
+* **wabrix_api:** This repository. Contains the generic `wabrix_api` SDK crate and canonical `.wit` interface definitions.
+* **wabrix_plugins:** Independent sibling repository with reusable implementations and example plugin crates.
 
 These repositories implement a high-performance, software-based networking engine/router. The system processes packets at high throughput (target: 25 Gbps – 100 Gbps) using Linux kernel-bypass via AF_XDP, and features a sandboxed WebAssembly plugin architecture for data-plane programmability.
 
@@ -21,27 +22,25 @@ These repositories implement a high-performance, software-based networking engin
 
 ## 2. Workspace Structure & Module Boundaries
 
-The `wabrix_api` workspace (`Cargo.toml` at the root) contains one library crate and four example plugin crates:
+The `wabrix_api` workspace (`Cargo.toml` at the root) contains the generic SDK library:
 
 ```
 wabrix_api/
-├── wabrix_api/          # Core SDK library: Packet<'a>, HeaderStack, protocol headers, routing types
-├── plugins/
-│   ├── tcp_engine/            # Example engine plugin: implements the packet-engine WIT interface
-│   └── generator_plugin/      # Example generator plugin: implements the generator WIT interface
+├── wabrix_api/          # Packet/header APIs, shared memory, mailbox, shared state, control types
 └── wit/
-    └── wabrix.wit            # WIT interface definitions (inspector, packet-engine, generator, logging)
+    └── wabrix.wit       # Canonical host/plugin interface definitions
 ```
+
+Plugin implementations and plugin crates live in the independent sibling
+`../wabrix_plugins` repository, which has its own Cargo workspace and build settings.
 
 ### Crate responsibilities & allowed dependencies
 
 | Crate | Role | May depend on |
 |---|---|---|
 | `wabrix_api` | Core SDK: `Packet<'a>`, `HeaderStack`, protocol header structs, routing result types, `StandardOpcode`; `no_std` compatible | `network-types`, `macaddr`, `byteorder`, `fnv`, `anyhow` |
-| `plugins/tcp_engine` | Example `engine-plugin`: implements `process-batch`, `process-timers`, `on-control-event`, `get-telemetry` | `wabrix_api`, `wit-bindgen`, `spin`, `network-types` |
-| `plugins/generator_plugin` | Example `generator-plugin`: implements `generate-batch` | `wabrix_api`, `wit-bindgen`, `network-types`, `macaddr`, `spin` |
 
-**Dependency direction is strictly one-way:** all plugin crates → `wabrix_api`. Never introduce reverse or circular dependencies.
+**Dependency direction is strictly one-way:** plugin crates → `wabrix_plugins` → `wabrix_api`, or plugin crates → `wabrix_api` directly. Never introduce reverse or circular dependencies. Generic API types, including `EngineTimerPlan`, stay in `wabrix_api`.
 
 ### Key source files
 
@@ -55,6 +54,7 @@ wabrix_api/
 | `wabrix_api/src/exports.rs` | Visibility gating for `Pdu0` / `HeaderStack`: `pub` when `host` feature enabled, `pub(crate)` otherwise |
 | `wabrix_api/src/wpdu_impl.rs` | `Pdu0` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
 | `wabrix_api/src/helpers.rs` | Checksum helpers and other protocol utilities |
+| `wabrix_api/src/timers.rs` | Generic `EngineTimerPlan` shared by native engines and the Wasm host |
 
 ---
 
@@ -63,7 +63,7 @@ wabrix_api/
 ### Language & Compiler
 * **Language:** Rust (Edition 2021).
 * **`no_std`:** `wabrix_api` is `#![no_std]` (uses `extern crate alloc`). Never introduce `std`-only dependencies into it.
-* **Linting:** Run `cargo clippy -p wabrix_api` (native) and `cargo clippy --target wasm32-wasip2` (WASM plugins). The codebase has a pre-existing warning backlog; `-D warnings` is the goal once that backlog is cleared. Until then, **new code must introduce zero new warnings** on either target. Do not use `#[allow(...)]` without a comment explaining why it is unavoidable.
+* **Linting:** Run `cargo clippy -p wabrix_api` (native) and `cargo clippy -p wabrix_api --target wasm32-wasip2` (Wasm SDK). The codebase has a pre-existing warning backlog; `-D warnings` is the goal once that backlog is cleared. Until then, **new code must introduce zero new warnings** on either target. Do not use `#[allow(...)]` without a comment explaining why it is unavoidable.
 
 ### Plugin Build Target
 * **Target:** `wasm32-wasip2` (WASI 0.2 / Component Model). All plugin crates are compiled as `crate-type = ["cdylib"]`.
@@ -72,7 +72,7 @@ wabrix_api/
 ### WIT Interface Standard
 * **Bindgen:** `wit-bindgen` generates WASM guest bindings from `wit/wabrix.wit`. Import it at the top of each plugin's `lib.rs` via `wit_bindgen::generate!`.
 * **Interface selection:** Implement exactly the WIT world that matches the plugin type (`filter-plugin`, `generator-plugin`, or `engine-plugin`). Do not mix world exports.
-* The `.wit` file is the source of truth for the host/plugin ABI. Never hand-code the ABI.
+* The `.wit` file is the source of truth for the host/plugin ABI. Never hand-code the ABI. The sibling plugin repository keeps a snapshot pinned by SDK Git revision and checksum; sync it there after committing canonical interface changes.
 
 ### Plugin State
 * **`spin::Mutex`** — use for `static` plugin state in `no_std` contexts (e.g., `static STATE: spin::Mutex<Option<PluginState>> = spin::Mutex::new(None)`).
@@ -142,8 +142,8 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 # Add the WASM Component Model target (once)
 rustup target add wasm32-wasip2
 
-# Build all plugins as WASM components
-cargo build --release --target wasm32-wasip2
+# Build the SDK for Wasm
+cargo build -p wabrix_api --release --target wasm32-wasip2
 
 # Build wabrix_api for native (host side, with host internals exposed)
 cargo build --release -p wabrix_api --features host
@@ -154,8 +154,10 @@ cargo clippy -p wabrix_api
 # Lint — wabrix_api with host internals exposed
 cargo clippy -p wabrix_api --features host
 
-# Lint — all WASM plugin crates
-cargo clippy --target wasm32-wasip2
+# Lint — SDK on Wasm
+cargo clippy -p wabrix_api --target wasm32-wasip2
+
+# Plugin builds and tests run in ../wabrix_plugins; see its AGENTS.md.
 
 # Note: the codebase has a pre-existing warning backlog across all targets.
 # Run without -D warnings until the backlog is resolved. New code must add zero
