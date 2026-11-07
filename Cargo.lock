@@ -58,21 +58,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "log"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "macaddr"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baee0bbc17ce759db233beb01648088061bf678383130602a298e6998eedb2d8"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "network-types"
 version = "0.2.0"
 source = "git+https://github.com/ninegamma/network-types.git?branch=zerocopy#c95ff07bf91e859ce6e460bcc6dd3608b740654d"
@@ -186,8 +171,6 @@ dependencies = [
  "byteorder",
  "fnv",
  "hashbrown",
- "log",
- "macaddr",
  "network-types",
  "serde",
  "zerocopy",

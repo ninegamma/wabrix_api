@@ -374,7 +374,7 @@ impl<'a> Packet<'a> {
 
     /// Writes MAC and IPv4 headers sequentially into the frame and updates the header stack.
     #[inline(always)]
-    pub fn write_mac_ipv4_headers(&mut self, mac: &EthHdr, ip: &Ipv4Hdr) -> u32 {
+    pub fn write_eth_ipv4_headers(&mut self, mac: &EthHdr, ip: &Ipv4Hdr) -> u32 {
         let mac_len = EthHdr::LEN;
         let ip_len = Ipv4Hdr::LEN;
 
@@ -404,7 +404,7 @@ impl<'a> Packet<'a> {
         total_len
     }
     #[inline(always)]
-    pub fn write_mac_ipv4_tcp_headers(
+    pub fn write_eth_ipv4_tcp_headers(
         &mut self,
         mac: &EthHdr,
         ip: &Ipv4Hdr,
@@ -445,7 +445,7 @@ impl<'a> Packet<'a> {
     }
 
     #[inline(always)]
-    pub fn write_mac_ipv4_udp_headers(
+    pub fn write_eth_ipv4_udp_headers(
         &mut self,
         mac: &EthHdr,
         ip: &Ipv4Hdr,
@@ -500,7 +500,7 @@ impl<'a> PacketBatch<'a> {
     pub fn new(batch_bytes: &'a mut [u8], umem_offset: u32) -> Self {
         // SAFETY: `batch_bytes` is a `&mut [u8]` owned by the caller for lifetime `'a`, so the
         // pointer is valid and exclusively held. The host ABI guarantees the buffer contains a
-        // contiguous array of packed `Pdu0` structs. `Pdu0` is `#[repr(C, align(64))]`; the
+        // contiguous array of packed `SharedPdu` structs. `SharedPdu` is `#[repr(C, align(64))]`; the
         // count is rounded down to whole structs, so we never read past the slice end. The
         // caller must ensure the buffer is 64-byte aligned (guaranteed by the WASM host ABI).
         let pdus = unsafe {

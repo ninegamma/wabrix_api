@@ -48,12 +48,11 @@ Plugin implementations and plugin crates live in the independent sibling
 | File | Contains |
 |---|---|
 | `wit/wabrix.wit` | WIT interface definitions: `inspector`, `packet-engine`, `generator`, `logging`; three worlds: `filter-plugin`, `generator-plugin`, `engine-plugin` |
-| `src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations |
-| `src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `Pdu0` + UMEM base address; primary plugin-facing API |
+| `src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations, and host-feature-gated re-exports for `PduCore` / `HeaderStack` |
+| `src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `SharedPdu` + UMEM base address; primary plugin-facing API |
 | `src/headers/hstack.rs` | `HeaderStack` — fixed-capacity (5 slots) parsed header descriptor; exactly 16 bytes |
 | `src/headers/` | Zero-copy header structs: `EthHeader`, `IpHeader`, `TcpHeader`, `UdpHeader`, `IcmpHeader`, `ArpIpv4Header`, `Ipv6Header` |
-| `src/exports.rs` | Visibility gating for `Pdu0` / `HeaderStack`: `pub` when `host` feature enabled, `pub(crate)` otherwise |
-| `src/wpdu_impl.rs` | `Pdu0` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
+| `src/wpdu_impl.rs` | `SharedPdu` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
 | `src/helpers.rs` | Checksum helpers and other protocol utilities |
 | `src/timers.rs` | Generic `EngineTimerPlan` shared by native engines and the Wasm host |
 
@@ -109,12 +108,12 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 
 ### C. Unsafe Code Guidelines
 
-* `unsafe` is restricted to: raw pointer arithmetic over WASM linear memory when reading/writing batch bytes, and low-level `Pdu0` internals in `wpdu_impl.rs`.
+* `unsafe` is restricted to: raw pointer arithmetic over WASM linear memory when reading/writing batch bytes, and low-level `SharedPdu` internals in `wpdu_impl.rs`.
 * **MANDATORY:** Every `unsafe` block must be preceded by a `// SAFETY:` comment explicitly proving why the operation cannot violate memory boundaries.
 
 ### D. The `host` Feature Flag
 
-* The `host` feature on `wabrix_api` exposes `Pdu0` and `HeaderStack` internals publicly — it is **reserved for the host engine** (`wabrix` repo) only.
+* The `host` feature on `wabrix_api` exposes `SharedPdu` and `HeaderStack` internals publicly — it is **reserved for the host engine** (`wabrix` repo) only.
 * **NEVER** enable `host` in a plugin's `Cargo.toml`. Plugins must only use the `Packet<'a>` API surface.
 
 ### E. Unrequested Code Changes

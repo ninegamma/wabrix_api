@@ -26,7 +26,7 @@ pub struct HeaderStack {
 /// The 56-byte portable packet descriptor exchanged between host and guest.
 #[repr(C)]
 #[derive(Clone, Debug)]
-pub struct WPdu {
+pub struct PduCore {
     /// Parsed header metadata.
     pub header_stack: HeaderStack,
     /// UMEM-relative packet-data offset.
@@ -53,34 +53,32 @@ pub struct WPdu {
 
 /// A 64-byte mailbox descriptor slot.
 #[repr(C, align(64))]
-pub struct Pdu0 {
+pub struct SharedPdu {
     /// Portable packet state visible to the guest.
-    pub w: WPdu,
+    pub w: PduCore,
     /// Opaque host-only state. Guests must never read or modify it.
-    pub(crate) _do_not_touch_padding: u64,
+    _do_not_touch_padding: u64,
 }
 
 /// Shared metadata mailbox for one Wasm instance.
 #[repr(C)]
 pub struct BatchMetadata {
     /// Packet descriptors written by the host and updated by the guest.
-    pub pdus: [Pdu0; MAX_BATCH_SIZE],
+    pub pdus: [SharedPdu; MAX_BATCH_SIZE],
     /// Routing actions written by the guest.
     pub actions: [u32; MAX_BATCH_SIZE],
 }
 
 /// Explicit ABI names for consumers that do not use the historical Rust names.
-pub type WpduCore = WPdu;
-pub type SharedPdu = Pdu0;
 pub type SharedMailbox = BatchMetadata;
 
 const _: () = assert!(core::mem::size_of::<HeaderStack>() == 16);
-const _: () = assert!(core::mem::size_of::<WPdu>() == 56);
-const _: () = assert!(core::mem::size_of::<Pdu0>() == 64);
-const _: () = assert!(core::mem::align_of::<Pdu0>() == 64);
+const _: () = assert!(core::mem::size_of::<PduCore>() == 56);
+const _: () = assert!(core::mem::size_of::<SharedPdu>() == 64);
+const _: () = assert!(core::mem::align_of::<SharedPdu>() == 64);
 const _: () = assert!(
     core::mem::size_of::<BatchMetadata>()
-        == MAX_BATCH_SIZE * core::mem::size_of::<Pdu0>()
+        == MAX_BATCH_SIZE * core::mem::size_of::<SharedPdu>()
             + MAX_BATCH_SIZE * core::mem::size_of::<u32>()
 );
 
@@ -88,22 +86,22 @@ const _: () = {
     assert!(core::mem::offset_of!(HeaderStack, offsets) == 0);
     assert!(core::mem::offset_of!(HeaderStack, kinds) == 10);
     assert!(core::mem::offset_of!(HeaderStack, hc) == 15);
-    assert!(core::mem::offset_of!(WPdu, header_stack) == 0);
-    assert!(core::mem::offset_of!(WPdu, desc_addr) == 16);
-    assert!(core::mem::offset_of!(WPdu, desc_len) == 24);
-    assert!(core::mem::offset_of!(WPdu, desc_options) == 28);
-    assert!(core::mem::offset_of!(WPdu, umem_group_id) == 32);
-    assert!(core::mem::offset_of!(WPdu, frame_size_log2) == 36);
-    assert!(core::mem::offset_of!(WPdu, worker_id) == 37);
-    assert!(core::mem::offset_of!(WPdu, flags) == 38);
-    assert!(core::mem::offset_of!(WPdu, timer_kind) == 39);
-    assert!(core::mem::offset_of!(WPdu, rx_timestamp) == 40);
-    assert!(core::mem::offset_of!(WPdu, timestamp) == 48);
-    assert!(core::mem::offset_of!(Pdu0, w) == 0);
-    assert!(core::mem::offset_of!(Pdu0, _do_not_touch_padding) == 56);
+    assert!(core::mem::offset_of!(PduCore, header_stack) == 0);
+    assert!(core::mem::offset_of!(PduCore, desc_addr) == 16);
+    assert!(core::mem::offset_of!(PduCore, desc_len) == 24);
+    assert!(core::mem::offset_of!(PduCore, desc_options) == 28);
+    assert!(core::mem::offset_of!(PduCore, umem_group_id) == 32);
+    assert!(core::mem::offset_of!(PduCore, frame_size_log2) == 36);
+    assert!(core::mem::offset_of!(PduCore, worker_id) == 37);
+    assert!(core::mem::offset_of!(PduCore, flags) == 38);
+    assert!(core::mem::offset_of!(PduCore, timer_kind) == 39);
+    assert!(core::mem::offset_of!(PduCore, rx_timestamp) == 40);
+    assert!(core::mem::offset_of!(PduCore, timestamp) == 48);
+    assert!(core::mem::offset_of!(SharedPdu, w) == 0);
+    assert!(core::mem::offset_of!(SharedPdu, _do_not_touch_padding) == 56);
     assert!(core::mem::offset_of!(BatchMetadata, pdus) == 0);
     assert!(
         core::mem::offset_of!(BatchMetadata, actions)
-            == MAX_BATCH_SIZE * core::mem::size_of::<Pdu0>()
+            == MAX_BATCH_SIZE * core::mem::size_of::<SharedPdu>()
     );
 };

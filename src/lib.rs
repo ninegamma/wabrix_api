@@ -9,16 +9,19 @@ pub mod headers;
 pub mod helpers;
 pub mod mailbox_api;
 pub mod packet;
-pub mod shared_memory;
+mod shared_memory;
 pub mod shared_state;
-pub mod exports;
 pub mod timers;
 // Declaring the implementation file, but keeping it hidden from the outside world.
 mod wpdu_impl;
 
-pub use shared_memory::{BatchMetadata, SharedMailbox, SharedPdu, WpduCore, MAX_BATCH_SIZE};
+pub use shared_memory::{BatchMetadata, SharedMailbox, MAX_BATCH_SIZE};
 pub use shared_state::SharedState;
 pub use timers::EngineTimerPlan;
+
+#[cfg(feature = "host")]
+pub use shared_memory::{HeaderStack, SharedPdu, PduCore};
+
 
 /// Timer frame kinds stored in the reserved WPdu padding byte.
 pub const TIMER_KIND_NONE: u8 = 0;

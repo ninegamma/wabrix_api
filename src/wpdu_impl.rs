@@ -1,7 +1,7 @@
 //! Guest-local behavior for the shared-memory packet layouts.
 
 
-use crate::shared_memory::{HeaderStack, Pdu0, WPdu};
+use crate::shared_memory::{HeaderStack, SharedPdu, PduCore};
 use core::ptr;
 use zerocopy::FromBytes;
 use network_types::arp::ArpHdr;
@@ -13,7 +13,7 @@ use network_types::udp::UdpHdr;
 use crate::headers::{EndOffset, Header, HeaderKind, ETH_HDR_SIZE};
 // Adjust imports as needed
 
-impl WPdu {
+impl PduCore {
     pub fn new(
         desc_addr: u64,
         desc_len: u32,
@@ -21,8 +21,8 @@ impl WPdu {
         umem_group_id: u32,
         frame_size_log2: u8,
         worker_id: u8,
-    ) -> WPdu {
-        WPdu {
+    ) -> PduCore {
+        PduCore {
             header_stack: HeaderStack::new(),
             desc_addr,
             desc_len,
@@ -35,9 +35,9 @@ impl WPdu {
     }
 }
 
-impl Default for WPdu {
+impl Default for PduCore {
     fn default() -> Self {
-        WPdu {
+        PduCore {
             header_stack: HeaderStack::new(),
             desc_addr: 0,
             desc_len: 0,
@@ -53,7 +53,7 @@ impl Default for WPdu {
     }
 }
 
-impl WPdu {
+impl PduCore {
     /// Helper: Get the frame size in bytes
     #[inline(always)]
     pub(crate) fn frame_size(&self) -> usize {
@@ -708,40 +708,40 @@ impl WPdu {
     }
 }
 
-// This lets you call `packet.parse_fast()` directly on Pdu0 in Wasm!
-impl core::ops::Deref for Pdu0 {
-    type Target = WPdu;
+// This lets you call `packet.parse_fast()` directly on SharedPdu in Wasm!
+impl core::ops::Deref for SharedPdu {
+    type Target = PduCore;
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.w
     }
 }
 
-impl core::ops::DerefMut for Pdu0 {
+impl core::ops::DerefMut for SharedPdu {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.w
     }
 }
 
-impl Drop for Pdu0 {
+impl Drop for SharedPdu {
     fn drop(&mut self) {
-        // If a Wasm developer lets a Pdu0 fall out of scope, the plugin will
+        // If a Wasm developer lets a SharedPdu fall out of scope, the plugin will
         // instantly trap and print this exact error to the Host logs!
         panic!(
-            "FATAL: Pdu0 dropped inside Wasm! \
+            "FATAL: SharedPdu dropped inside Wasm! \
             All packets must be explicitly pushed to a WBatch and returned to the Host."
         );
     }
 }
 /*
-impl Pdu0 {
+impl SharedPdu {
     #[inline]
     pub fn slice_from_bytes(bytes: &mut [u8]) -> &mut [Self] {
         let count = bytes.len() / core::mem::size_of::<Self>();
         // SAFETY: `bytes` is an exclusively-held `&mut [u8]`, so the pointer is valid and
-        // uniquely owned. `count` is rounded down to whole `Pdu0` structs, so we never read
-        // past the slice end. `Pdu0` is `#[repr(C, align(64))]`; the caller must ensure the
+        // uniquely owned. `count` is rounded down to whole `SharedPdu` structs, so we never read
+        // past the slice end. `SharedPdu` is `#[repr(C, align(64))]`; the caller must ensure the
         // buffer is 64-byte aligned (guaranteed by the host WASM ABI).
         unsafe { core::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut Self, count) }
     }
@@ -801,4 +801,4 @@ impl Pdu0 {
     }
 }
 */
-const _: () = assert!(size_of::<Pdu0>() == 64);
+const _: () = assert!(size_of::<SharedPdu>() == 64);
