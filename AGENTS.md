@@ -20,13 +20,14 @@ These repositories implement a high-performance, software-based networking engin
 
 ---
 
-## 2. Workspace Structure & Module Boundaries
+## 2. Package Structure & Module Boundaries
 
-The `wabrix_api` workspace (`Cargo.toml` at the root) contains the generic SDK library:
+The standalone `wabrix_api` Cargo package (`Cargo.toml` at the repository root) contains the generic SDK library:
 
 ```
 wabrix_api/
-├── wabrix_api/          # Packet/header APIs, shared memory, mailbox, shared state, control types
+├── src/                 # Packet/header APIs, shared memory, mailbox, shared state, control types
+├── wabrix_api/          # ABI layout checks and SDK documentation
 └── wit/
     └── wabrix.wit       # Canonical host/plugin interface definitions
 ```
@@ -47,14 +48,14 @@ Plugin implementations and plugin crates live in the independent sibling
 | File | Contains |
 |---|---|
 | `wit/wabrix.wit` | WIT interface definitions: `inspector`, `packet-engine`, `generator`, `logging`; three worlds: `filter-plugin`, `generator-plugin`, `engine-plugin` |
-| `wabrix_api/src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations |
-| `wabrix_api/src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `Pdu0` + UMEM base address; primary plugin-facing API |
-| `wabrix_api/src/hstack.rs` | `HeaderStack` — fixed-capacity (5 slots) parsed header descriptor; exactly 16 bytes |
-| `wabrix_api/src/headers/` | Zero-copy header structs: `EthHeader`, `IpHeader`, `TcpHeader`, `UdpHeader`, `IcmpHeader`, `ArpIpv4Header`, `Ipv6Header` |
-| `wabrix_api/src/exports.rs` | Visibility gating for `Pdu0` / `HeaderStack`: `pub` when `host` feature enabled, `pub(crate)` otherwise |
-| `wabrix_api/src/wpdu_impl.rs` | `Pdu0` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
-| `wabrix_api/src/helpers.rs` | Checksum helpers and other protocol utilities |
-| `wabrix_api/src/timers.rs` | Generic `EngineTimerPlan` shared by native engines and the Wasm host |
+| `src/lib.rs` | Crate root: `TELEMETRY_FLAG`, `StandardOpcode`, module declarations |
+| `src/packet.rs` | `Packet<'a>` — safe high-level view over a mutable `Pdu0` + UMEM base address; primary plugin-facing API |
+| `src/headers/hstack.rs` | `HeaderStack` — fixed-capacity (5 slots) parsed header descriptor; exactly 16 bytes |
+| `src/headers/` | Zero-copy header structs: `EthHeader`, `IpHeader`, `TcpHeader`, `UdpHeader`, `IcmpHeader`, `ArpIpv4Header`, `Ipv6Header` |
+| `src/exports.rs` | Visibility gating for `Pdu0` / `HeaderStack`: `pub` when `host` feature enabled, `pub(crate)` otherwise |
+| `src/wpdu_impl.rs` | `Pdu0` internals: raw PDU layout, `parse_fast`, `data_ptr`, `push_header` |
+| `src/helpers.rs` | Checksum helpers and other protocol utilities |
+| `src/timers.rs` | Generic `EngineTimerPlan` shared by native engines and the Wasm host |
 
 ---
 
@@ -143,19 +144,19 @@ Standard Rust ergonomics apply. Heap allocations and `anyhow`-based error handli
 rustup target add wasm32-wasip2
 
 # Build the SDK for Wasm
-cargo build -p wabrix_api --release --target wasm32-wasip2
+cargo build --release --target wasm32-wasip2
 
 # Build wabrix_api for native (host side, with host internals exposed)
-cargo build --release -p wabrix_api --features host
+cargo build --release --features host
 
 # Lint — wabrix_api native (default features)
-cargo clippy -p wabrix_api
+cargo clippy
 
 # Lint — wabrix_api with host internals exposed
-cargo clippy -p wabrix_api --features host
+cargo clippy --features host
 
 # Lint — SDK on Wasm
-cargo clippy -p wabrix_api --target wasm32-wasip2
+cargo clippy --target wasm32-wasip2
 
 # Plugin builds and tests run in ../wabrix_plugins; see its AGENTS.md.
 

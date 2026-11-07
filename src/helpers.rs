@@ -1,11 +1,11 @@
-use crate::exports::WPdu;
+//use crate::exports::WPdu;
 use crate::headers::check::ipv4_checksum;
-use crate::headers::{update_ipv4_checksum, EndOffset, HeaderKind};
+//use crate::headers::{update_ipv4_checksum, EndOffset, HeaderKind};
 use anyhow::anyhow;
-use log::trace;
-use zerocopy::FromBytes;
-use network_types::ip::Ipv4Hdr;
-use network_types::tcp::TcpHdr;
+//use log::trace;
+//use zerocopy::FromBytes;
+//use network_types::ip::Ipv4Hdr;
+//use network_types::tcp::TcpHdr;
 
 #[inline]
 pub fn update_tcp_checksum(
@@ -25,6 +25,7 @@ pub fn update_tcp_checksum(
     tcp_segment[16..18].copy_from_slice(&checksum.to_be_bytes());
 }
 
+/*
 #[inline]
 pub fn prepare_checksums_and_ttl(p: &mut WPdu, base_addr: usize) {
     let frame_size = p.frame_size();
@@ -100,6 +101,7 @@ pub fn prepare_checksums_and_ttl(p: &mut WPdu, base_addr: usize) {
         checksum
     );
 }
+*/
 
 pub fn parse_suffixed_number(pps_str: &str) -> anyhow::Result<u64> {
     let s = pps_str.to_lowercase();

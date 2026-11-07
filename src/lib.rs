@@ -11,10 +11,10 @@ pub mod mailbox_api;
 pub mod packet;
 pub mod shared_memory;
 pub mod shared_state;
-// Declare the implementation file, but keep it hidden from the outside world.
-mod wpdu_impl;
 pub mod exports;
 pub mod timers;
+// Declaring the implementation file, but keeping it hidden from the outside world.
+mod wpdu_impl;
 
 pub use shared_memory::{BatchMetadata, SharedMailbox, SharedPdu, WpduCore, MAX_BATCH_SIZE};
 pub use shared_state::SharedState;
