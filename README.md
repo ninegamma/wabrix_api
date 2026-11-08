@@ -44,7 +44,7 @@ wabrix_api/
 │   ├── check_abi_consistency.py
 │   └── check_abi.sh            # Cargo-based ABI verification wrapper
 ├── wit/wabrix.wit              # Canonical Component Model interfaces
-└── docs/                       # SDK design notes
+└── aliasing_guidelines.md      # SDK design notes
 ```
 
 ## Prerequisites
@@ -217,10 +217,13 @@ The automatic shared-memory checks cover the declared numeric comparisons
 and compiler layout assertions; WIT interface compatibility and shared-state
 schema upgrades follow their respective contracts.
 
-The plugin repository maintains a WIT snapshot pinned to an SDK Git revision
-and SHA-256 checksum. Its `scripts/sync_wit.py` tool manages that snapshot;
+The plugin repository maintains a WIT snapshot with its SDK origin revision,
+version, and SHA-256 checksum. Its `scripts/sync_wit.py` tool manages that snapshot;
 the canonical interface remains in this SDK repository. Commit canonical WIT
-changes here before updating the plugin snapshot. See
+changes here before updating the plugin snapshot. The check requires a
+Cargo-compatible SDK version; the SDK dependency may use another commit or a
+compatible local path checkout. Breaking WIT changes must also bump the SDK's
+compatibility series. See
 [`SharedState`](src/shared_state.rs) and the WIT `shared-state` interface for
 shared-state layout declarations and compatible upgrades.
 

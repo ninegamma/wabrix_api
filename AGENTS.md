@@ -86,7 +86,7 @@ Plugin implementations and plugin crates live in the independent sibling
 ### WIT Interface Standard
 * **Bindgen:** `wit-bindgen` generates WASM guest bindings from `wit/wabrix.wit`. Import it at the top of each plugin's `lib.rs` via `wit_bindgen::generate!`.
 * **Interface selection:** Use `engine-plugin` for new plugins, including generators. It exports `packet-engine` and imports `logging` and `shared-state`. The legacy `generator-plugin` world and its `generator` interface are deprecated and will be removed in one of the next versions; replace `generator_plugin.wasm` with `generator_engine.wasm`. The current WIT has no `filter-plugin` world.
-* The `.wit` file is the source of truth for the host/plugin ABI. Never hand-code the ABI. The sibling plugin repository keeps a snapshot pinned by SDK Git revision and checksum; sync it there after committing canonical interface changes.
+* The `.wit` file is the source of truth for the host/plugin ABI. Never hand-code the ABI. The sibling plugin repository records a snapshot's SDK origin revision, version, and checksum; sync it there after committing canonical interface changes. SDK dependencies use Cargo version compatibility rather than requiring that exact commit. Breaking WIT changes must bump the SDK's compatibility series too.
 
 ### Plugin State
 * In plugin code in `../wabrix_plugins`, **`spin::Mutex`** can protect `static` state in `no_std` contexts (for example, `static STATE: spin::Mutex<Option<PluginState>> = spin::Mutex::new(None)`). `spin` is a plugin-side dependency, not a `wabrix_api` dependency.
