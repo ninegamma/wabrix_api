@@ -13,18 +13,23 @@
 #include <stdint.h>
 
 #define WABRIX_SHARED_MEMORY_ABI_VERSION 1
-#define WABRIX_MAX_BATCH_SIZE 512
+#define WABRIX_MAX_BATCH_SIZE 768
 #define WABRIX_MAX_HEADERS 5
 
 enum wabrix_header_kind {
     WABRIX_HEADER_NULL = 0,
-    WABRIX_HEADER_MAC = 1,
+    WABRIX_HEADER_ETH = 1,
+    /* Legacy alias; Rust names this header kind `Eth`. */
+    WABRIX_HEADER_MAC = WABRIX_HEADER_ETH,
     WABRIX_HEADER_ARP_IPV4 = 2,
     WABRIX_HEADER_IP = 3,
     WABRIX_HEADER_IPV6 = 4,
     WABRIX_HEADER_TCP = 5,
     WABRIX_HEADER_UDP = 6,
-    WABRIX_HEADER_ICMP = 7,
+    WABRIX_HEADER_ICMPV4 = 7,
+    WABRIX_HEADER_ICMPV6 = 8,
+    /* Legacy alias for ICMPv4; use the explicit constants in new code. */
+    WABRIX_HEADER_ICMP = WABRIX_HEADER_ICMPV4,
 };
 
 typedef struct wabrix_header_stack {
@@ -66,6 +71,9 @@ typedef struct wabrix_batch_metadata {
 #define WABRIX_STATIC_ASSERT(name, expression) _Static_assert(expression, #name)
 
 WABRIX_STATIC_ASSERT(header_stack_size, sizeof(wabrix_header_stack_t) == 16);
+WABRIX_STATIC_ASSERT(header_eth_kind, WABRIX_HEADER_ETH == 1);
+WABRIX_STATIC_ASSERT(header_icmpv4_kind, WABRIX_HEADER_ICMPV4 == 7);
+WABRIX_STATIC_ASSERT(header_icmpv6_kind, WABRIX_HEADER_ICMPV6 == 8);
 WABRIX_STATIC_ASSERT(header_stack_offsets, offsetof(wabrix_header_stack_t, offsets) == 0);
 WABRIX_STATIC_ASSERT(header_stack_kinds, offsetof(wabrix_header_stack_t, kinds) == 10);
 WABRIX_STATIC_ASSERT(header_stack_count, offsetof(wabrix_header_stack_t, header_count) == 15);
@@ -89,8 +97,9 @@ WABRIX_STATIC_ASSERT(pdu_core, offsetof(wabrix_pdu_t, core) == 0);
 WABRIX_STATIC_ASSERT(pdu_host_padding, offsetof(wabrix_pdu_t, host_padding) == 56);
 
 WABRIX_STATIC_ASSERT(mailbox_pdus, offsetof(wabrix_batch_metadata_t, pdus) == 0);
-WABRIX_STATIC_ASSERT(mailbox_actions, offsetof(wabrix_batch_metadata_t, actions) == 32768);
-WABRIX_STATIC_ASSERT(mailbox_size, sizeof(wabrix_batch_metadata_t) == 34816);
+WABRIX_STATIC_ASSERT(batch_capacity, WABRIX_MAX_BATCH_SIZE == 768);
+WABRIX_STATIC_ASSERT(mailbox_actions, offsetof(wabrix_batch_metadata_t, actions) == 49152);
+WABRIX_STATIC_ASSERT(mailbox_size, sizeof(wabrix_batch_metadata_t) == 52224);
 
 #undef WABRIX_STATIC_ASSERT
 #undef WABRIX_ALIGN_64

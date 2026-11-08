@@ -1,8 +1,12 @@
 #include "wabrix_shared_memory.h"
 
 /*
- * Compile this translation unit with a C11 compiler to validate the public
- * shared-memory header independently of the Rust crate:
+ * Run C/Rust numeric consistency, C layout checks, and Rust compile-time layout
+ * assertions from the SDK root with:
  *
- *   cc -std=c11 -Wall -Wextra -Werror -I abi -c abi/layout_check.c
+ *   ./abi/check_abi.sh
+ *
+ * To validate only the C header:
+ *
+ *   cc -std=c11 -Wall -Wextra -Werror -I abi -fsyntax-only abi/layout_check.c
  */
